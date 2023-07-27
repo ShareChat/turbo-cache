@@ -19,8 +19,7 @@ func TestCacheSmall(t *testing.T) {
 		t.Fatalf("unexpected non-empty value obtained from small cache: %q", v)
 	}
 
-	c.Set([]byte("key"), []byte("value"))
-	time.Sleep(10 * time.Millisecond)
+	c.Set([]byte("key"), []byte("value")).Wait()
 	if v := c.Get(nil, []byte("key")); string(v) != "value" {
 		t.Fatalf("unexpected value obtained; got %q; want %q", v, "value")
 	}
@@ -34,8 +33,7 @@ func TestCacheSmall(t *testing.T) {
 		t.Fatalf("unexpected non-empty value obtained from small cache: %q", v)
 	}
 
-	c.Set([]byte("aaa"), []byte("bbb"))
-	time.Sleep(10 * time.Millisecond)
+	c.Set([]byte("aaa"), []byte("bbb")).Wait()
 	if v := c.Get(nil, []byte("aaa")); string(v) != "bbb" {
 		t.Fatalf("unexpected value obtained; got %q; want %q", v, "bbb")
 	}
@@ -53,8 +51,8 @@ func TestCacheSmall(t *testing.T) {
 
 	// Test empty value
 	k := []byte("empty")
-	c.Set(k, nil)
-	time.Sleep(10 * time.Millisecond)
+	c.Set(k, nil).Wait()
+
 	if v := c.Get(nil, k); len(v) != 0 {
 		t.Fatalf("unexpected non-empty value obtained from empty entry: %q", v)
 	}
@@ -76,13 +74,14 @@ func TestCacheWrap(t *testing.T) {
 	defer c.Reset()
 
 	calls := uint64(5e6)
-
+	g := newCombinedWaitGroup()
 	for i := uint64(0); i < calls; i++ {
 		k := []byte(fmt.Sprintf("key %d", i))
 		v := []byte(fmt.Sprintf("value %d", i))
-		c.Set(k, v)
+		g.Add(c.Set(k, v))
 	}
 
+	g.Wait()
 	for i := uint64(0); i < calls/10; i++ {
 		x := i * 10
 		k := []byte(fmt.Sprintf("key %d", x))
@@ -125,9 +124,8 @@ func TestCacheDel(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		k := []byte(fmt.Sprintf("key %d", i))
 		v := []byte(fmt.Sprintf("value %d", i))
-		c.Set(k, v)
+		c.Set(k, v).Wait()
 
-		time.Sleep(10 * time.Millisecond)
 		vv := c.Get(nil, k)
 		if string(vv) != string(v) {
 			t.Fatalf("unexpected value for key %q; got %q; want %q", k, vv, v)
@@ -147,7 +145,7 @@ func TestCacheBigKeyValue(t *testing.T) {
 	// Both key and value exceed 64Kb
 	k := make([]byte, 90*1024)
 	v := make([]byte, 100*1024)
-	c.Set(k, v)
+	c.Set(k, v).Wait()
 	vv := c.Get(nil, k)
 	if len(vv) > 0 {
 		t.Fatalf("unexpected non-empty value got for key %q: %q", k, vv)
@@ -156,7 +154,7 @@ func TestCacheBigKeyValue(t *testing.T) {
 	// len(key) + len(value) > 64Kb
 	k = make([]byte, 40*1024)
 	v = make([]byte, 40*1024)
-	c.Set(k, v)
+	c.Set(k, v).Wait()
 	vv = c.Get(nil, k)
 	if len(vv) > 0 {
 		t.Fatalf("unexpected non-empty value got for key %q: %q", k, vv)
@@ -197,12 +195,13 @@ func TestCacheGetSetConcurrent(t *testing.T) {
 }
 
 func testCacheGetSet(c *Cache, itemsCount int) error {
+	waitGroup := newCombinedWaitGroup()
 	for i := 0; i < itemsCount; i++ {
 		k := []byte(fmt.Sprintf("key %d", i))
 		v := []byte(fmt.Sprintf("value %d", i))
-		c.Set(k, v)
+		waitGroup.Add(c.Set(k, v))
 	}
-	time.Sleep(25 * time.Millisecond)
+	waitGroup.Wait()
 	for i := 0; i < itemsCount; i++ {
 		k := []byte(fmt.Sprintf("key %d", i))
 		v := []byte(fmt.Sprintf("value %d", i))
@@ -282,7 +281,6 @@ func TestCacheResetUpdateStatsSetConcurrent(t *testing.T) {
 				key := []byte(fmt.Sprintf("key_%d", j))
 				value := []byte(fmt.Sprintf("value_%d", j))
 				c.Set(key, value)
-				time.Sleep(10 * time.Millisecond)
 				runtime.Gosched()
 			}
 		}()
@@ -293,4 +291,28 @@ func TestCacheResetUpdateStatsSetConcurrent(t *testing.T) {
 	close(stopCh)
 	statsWG.Wait()
 	resettersWG.Wait()
+}
+
+type combinedWaitGroup struct {
+	groups []*sync.WaitGroup
+	mutex  sync.Mutex
+}
+
+func newCombinedWaitGroup() *combinedWaitGroup {
+	return &combinedWaitGroup{groups: make([]*sync.WaitGroup, 0)}
+}
+
+func (w *combinedWaitGroup) Add(g *sync.WaitGroup) {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	w.groups = append(w.groups, g)
+}
+
+func (w *combinedWaitGroup) Wait() {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	for _, group := range w.groups {
+		group.Wait()
+	}
+	w.groups = make([]*sync.WaitGroup, 0)
 }

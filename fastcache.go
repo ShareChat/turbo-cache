@@ -149,10 +149,10 @@ func New(maxBytes int) *Cache {
 // SetBig can be used for storing entries exceeding 64KB.
 //
 // k and v contents may be modified after returning from Set.
-func (c *Cache) Set(k, v []byte) {
+func (c *Cache) Set(k, v []byte) *sync.WaitGroup {
 	h := xxhash.Sum64(k)
 	idx := h % bucketsCount
-	c.buckets[idx].Set(k, v, h)
+	return c.buckets[idx].Set(k, v)
 }
 
 // Get appends value by the key k to dst and returns the result.
@@ -253,45 +253,55 @@ func (b *bucket) Init(maxBytes uint64) {
 	b.chunks = make([][]byte, maxChunks)
 	b.m = make(map[uint64]uint64)
 	b.Reset()
-	b.setBuf = make(chan *insertValue, setBufSize)
-	go b.processWriteQueue()
+	b.startProcessingWriteQueue()
 }
 
-func (b *bucket) processWriteQueue() {
-	t := time.Tick(maxDelayMillis * time.Millisecond)
-	var firstTimeTimestamp int64
-	keys := make([][]byte, 0, 64)
-	values := make([][]byte, 0, 64)
-	waitGroups := make([]*sync.WaitGroup, 0, 64)
-	for {
-		select {
-		case i := <-b.setBuf:
-			if firstTimeTimestamp == 0 {
-				firstTimeTimestamp = time.Now().UnixMilli()
-			}
-			keys = append(keys, i.K)
-			values = append(values, i.V)
-			waitGroups = append(waitGroups, i.waitGroup)
-			if len(keys) >= writeSizeThreshold || time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= maxDelayMillis {
-				b.setBatch(keys, values)
-				firstTimeTimestamp = 0
-				keys = make([][]byte, 0, 64)
-				values = make([][]byte, 0, 64)
-				waitGroups = make([]*sync.WaitGroup, 0, 64)
-			}
-		case _ = <-t:
-			if firstTimeTimestamp != 0 && (len(keys) >= writeSizeThreshold || time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= maxDelayMillis) {
-				b.setBatch(keys, values)
-				for _, group := range waitGroups {
-					group.Done()
+func (b *bucket) startProcessingWriteQueue() {
+	b.setBuf = make(chan *insertValue, setBufSize)
+	go func() {
+		t := time.Tick(maxDelayMillis * time.Millisecond)
+		var firstTimeTimestamp int64
+		const initSize = 64
+		keys := make([][]byte, 0, initSize)
+		values := make([][]byte, 0, initSize)
+		waitGroups := make([]*sync.WaitGroup, 0, initSize)
+		for {
+			select {
+			case i := <-b.setBuf:
+				if firstTimeTimestamp == 0 {
+					firstTimeTimestamp = time.Now().UnixMilli()
 				}
-				firstTimeTimestamp = 0
-				keys = make([][]byte, 0, 64)
-				values = make([][]byte, 0, 64)
-				waitGroups = make([]*sync.WaitGroup, 0, 64)
+				keys = append(keys, i.K)
+				values = append(values, i.V)
+				waitGroups = append(waitGroups, i.waitGroup)
+				if len(keys) >= writeSizeThreshold || time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= maxDelayMillis {
+					b.setBatch(keys, values)
+
+					for _, group := range waitGroups {
+						group.Done()
+					}
+
+					firstTimeTimestamp = 0
+					keys = make([][]byte, 0, initSize)
+					values = make([][]byte, 0, initSize)
+					waitGroups = make([]*sync.WaitGroup, 0, initSize)
+				}
+			case _ = <-t:
+				if firstTimeTimestamp != 0 && (len(keys) >= writeSizeThreshold || time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= maxDelayMillis) {
+					b.setBatch(keys, values)
+
+					for _, group := range waitGroups {
+						group.Done()
+					}
+
+					firstTimeTimestamp = 0
+					keys = make([][]byte, 0, initSize)
+					values = make([][]byte, 0, initSize)
+					waitGroups = make([]*sync.WaitGroup, 0, initSize)
+				}
 			}
 		}
-	}
+	}()
 }
 
 func (b *bucket) Reset() {
@@ -402,7 +412,7 @@ func (b *bucket) set(k, v []byte, h uint64) {
 	}
 }
 
-func (b *bucket) Set(k, v []byte, h uint64) {
+func (b *bucket) Set(k, v []byte) *sync.WaitGroup {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	b.setBuf <- &insertValue{
@@ -410,6 +420,7 @@ func (b *bucket) Set(k, v []byte, h uint64) {
 		V:         v,
 		waitGroup: &wg,
 	}
+	return &wg
 }
 
 func (b *bucket) setBatch(k, v [][]byte) {

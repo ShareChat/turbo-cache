@@ -400,7 +400,7 @@ func (b *bucket) Load(r io.Reader, maxChunks uint64) error {
 	b.idx = bIdx
 	b.gen = bGen
 	b.mu.Unlock()
-
+	b.startProcessingWriteQueue()
 	return nil
 }
 

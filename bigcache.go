@@ -33,6 +33,7 @@ const maxKeyLen = chunkSize - 16 - 4 - 1
 //
 // k and v contents may be modified after returning from SetBig.
 func (c *Cache) SetBig(k, v []byte) {
+	panic("big is not implemented in this cache")
 	atomic.AddUint64(&c.bigStats.SetBigCalls, 1)
 	if len(k) > maxKeyLen {
 		atomic.AddUint64(&c.bigStats.TooBigKeyErrors, 1)

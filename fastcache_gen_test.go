@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"strconv"
 	"testing"
-	"time"
 )
 
 func TestGenerationOverflow(t *testing.T) {
@@ -30,9 +29,10 @@ func TestGenerationOverflow(t *testing.T) {
 
 	// Do some initial Set/Get demonstrate that this works
 	for i := 0; i < 10; i++ {
-		c.Set(key1, bigVal1)
-		c.Set(key2, bigVal2)
-		time.Sleep(25 * time.Millisecond)
+		wg1 := c.Set(key1, bigVal1)
+		wg2 := c.Set(key2, bigVal2)
+		wg1.Wait()
+		wg2.Wait()
 		getVal(t, c, key1, bigVal1)
 		getVal(t, c, key2, bigVal2)
 		genVal(t, c, uint64(1+i))
@@ -45,9 +45,11 @@ func TestGenerationOverflow(t *testing.T) {
 	// c.buckets[100].gen == 16,777,215
 	// Set/Get still works
 
-	c.Set(key1, bigVal1)
-	c.Set(key2, bigVal2)
-	time.Sleep(25 * time.Millisecond)
+	wg1 := c.Set(key1, bigVal1)
+	wg2 := c.Set(key2, bigVal2)
+
+	wg1.Wait()
+	wg2.Wait()
 
 	getVal(t, c, key1, bigVal1)
 	getVal(t, c, key2, bigVal2)
@@ -59,8 +61,7 @@ func TestGenerationOverflow(t *testing.T) {
 
 	// This set creates an index where `idx | (b.gen << bucketSizeBits)` == 0
 	// The value is in the cache but is unreadable by Get
-	c.Set(key1, bigVal1)
-	time.Sleep(25 * time.Millisecond)
+	c.Set(key1, bigVal1).Wait()
 	// The Set above overflowed the bucket's generation. This means that
 	// key2 is still in the cache, but can't get read because key2 has a
 	// _very large_ generation value and appears to be from the future
@@ -68,8 +69,7 @@ func TestGenerationOverflow(t *testing.T) {
 
 	// This Set creates an index where `(b.gen << bucketSizeBits)>>bucketSizeBits)==0`
 	// The value is in the cache but is unreadable by Get
-	c.Set(key2, bigVal2)
-	time.Sleep(25 * time.Millisecond)
+	c.Set(key2, bigVal2).Wait()
 	// Ensure generations are working as we expect
 	// NB: Here we skip the 2^24 generation, because the bucket carefully
 	// avoids `generation==0`
@@ -80,9 +80,12 @@ func TestGenerationOverflow(t *testing.T) {
 
 	// Do it a few more times to show that this bucket is now unusable
 	for i := 0; i < 10; i++ {
-		c.Set(key1, bigVal1)
-		c.Set(key2, bigVal2)
-		time.Sleep(25 * time.Millisecond)
+		wg1 := c.Set(key1, bigVal1)
+		wg2 := c.Set(key2, bigVal2)
+
+		wg1.Wait()
+		wg2.Wait()
+
 		getVal(t, c, key1, bigVal1)
 		getVal(t, c, key2, bigVal2)
 		genVal(t, c, uint64((1<<24)+2+i))
