@@ -7,7 +7,7 @@ import (
 )
 
 func TestGenerationOverflow(t *testing.T) {
-	c := New(1) // each bucket has 64 *1024 bytes capacity
+	c := New(NewConfig(1, 5, 100)) // each bucket has 64 *1024 bytes capacity
 
 	// Initial generation is 1
 	genVal(t, c, 1)

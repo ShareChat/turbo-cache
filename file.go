@@ -92,7 +92,7 @@ func LoadFromFileOrNew(filePath string, maxBytes int) *Cache {
 	if err == nil {
 		return c
 	}
-	return New(maxBytes)
+	return New(NewConfig(maxBytes, 5, 100))
 }
 
 func (c *Cache) save(dir string, workersCount int) error {
@@ -400,7 +400,7 @@ func (b *bucket) Load(r io.Reader, maxChunks uint64) error {
 	b.idx = bIdx
 	b.gen = bGen
 	b.mu.Unlock()
-	b.startProcessingWriteQueue()
+	b.startProcessingWriteQueue(5, 100)
 	return nil
 }
 

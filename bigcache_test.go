@@ -8,7 +8,7 @@ import (
 
 func TestSetGetBig(t *testing.T) {
 	t.Skip("not implemented")
-	c := New(256 * 1024 * 1024)
+	c := New(NewConfig(256*1024*1024, 5, 100))
 	const valuesCount = 10
 	for _, valueSize := range []int{1, 100, 1<<16 - 1, 1 << 16, 1<<16 + 1, 1 << 17, 1<<17 + 1, 1<<17 - 1, 1 << 19} {
 		t.Run(fmt.Sprintf("valueSize_%d", valueSize), func(t *testing.T) {

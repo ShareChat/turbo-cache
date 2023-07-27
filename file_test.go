@@ -17,7 +17,7 @@ func TestSaveLoadSmall(t *testing.T) {
 	filePath := filepath.Join(tmpDir, "TestSaveLoadSmall.fastcache")
 	defer os.RemoveAll(filePath)
 
-	c := New(1)
+	c := New(NewConfig(1, 5, 100))
 	defer c.Reset()
 
 	key := []byte("foobar")
@@ -67,7 +67,7 @@ func testSaveLoadFile(t *testing.T, concurrency int) {
 
 	const itemsCount = 10000
 	const maxBytes = bucketsCount * chunkSize * 2
-	c := New(maxBytes)
+	c := New(NewConfig(maxBytes, 5, 100))
 	for i := 0; i < itemsCount; i++ {
 		k := []byte(fmt.Sprintf("key %d", i))
 		v := []byte(fmt.Sprintf("value %d", i))
@@ -179,7 +179,7 @@ func testSaveLoadFile(t *testing.T, concurrency int) {
 }
 
 func TestSaveLoadConcurrent(t *testing.T) {
-	c := New(1024)
+	c := New(NewConfig(1024, 5, 100))
 	defer c.Reset()
 	c.Set([]byte("foo"), []byte("bar"))
 

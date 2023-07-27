@@ -12,8 +12,8 @@ import (
 )
 
 const setBufSize = 32 * 1024
-const writeSizeThreshold = 1000
-const maxDelayMillis = 5
+const defaultMaxWriteSizeBatch = 1000
+const defaultFlushIntervalMillis = 5
 
 const bucketsCount = 1024
 
@@ -124,14 +124,20 @@ type Cache struct {
 // since the cache holds data in memory.
 //
 // If maxBytes is less than 32MB, then the minimum cache capacity is 32MB.
-func New(maxBytes int) *Cache {
-	if maxBytes <= 0 {
-		panic(fmt.Errorf("maxBytes must be greater than 0; got %d", maxBytes))
+func New(config *Config) *Cache {
+	if config.maxBytes <= 0 {
+		panic(fmt.Errorf("maxBytes must be greater than 0; got %d", config.maxBytes))
+	}
+	if config.flushIntervalMillis == 0 {
+		config.flushIntervalMillis = defaultFlushIntervalMillis
+	}
+	if config.maxWriteBatch == 0 {
+		config.maxWriteBatch = defaultMaxWriteSizeBatch
 	}
 	var c Cache
-	maxBucketBytes := uint64((maxBytes + bucketsCount - 1) / bucketsCount)
+	maxBucketBytes := uint64((config.maxBytes + bucketsCount - 1) / bucketsCount)
 	for i := range c.buckets[:] {
-		c.buckets[i].Init(maxBucketBytes)
+		c.buckets[i].Init(maxBucketBytes, config.flushIntervalMillis, config.maxWriteBatch)
 	}
 	return &c
 }
@@ -242,7 +248,7 @@ type bucket struct {
 	corruptions uint64
 }
 
-func (b *bucket) Init(maxBytes uint64) {
+func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int) {
 	if maxBytes == 0 {
 		panic(fmt.Errorf("maxBytes cannot be zero"))
 	}
@@ -253,18 +259,19 @@ func (b *bucket) Init(maxBytes uint64) {
 	b.chunks = make([][]byte, maxChunks)
 	b.m = make(map[uint64]uint64)
 	b.Reset()
-	b.startProcessingWriteQueue()
+	b.startProcessingWriteQueue(flushInterval, maxBatch)
 }
 
-func (b *bucket) startProcessingWriteQueue() {
+func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 	b.setBuf = make(chan *insertValue, setBufSize)
+	const initSize = 64
 	go func() {
-		t := time.Tick(maxDelayMillis * time.Millisecond)
+		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
+
 		var firstTimeTimestamp int64
-		const initSize = 64
-		keys := make([][]byte, 0, initSize)
-		values := make([][]byte, 0, initSize)
+		keys, values := make([][]byte, 0, initSize), make([][]byte, 0, initSize)
 		waitGroups := make([]*sync.WaitGroup, 0, initSize)
+
 		for {
 			select {
 			case i := <-b.setBuf:
@@ -274,7 +281,7 @@ func (b *bucket) startProcessingWriteQueue() {
 				keys = append(keys, i.K)
 				values = append(values, i.V)
 				waitGroups = append(waitGroups, i.waitGroup)
-				if len(keys) >= writeSizeThreshold || time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= maxDelayMillis {
+				if len(keys) >= maxBatch || time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval {
 					b.setBatch(keys, values)
 
 					for _, group := range waitGroups {
@@ -282,12 +289,11 @@ func (b *bucket) startProcessingWriteQueue() {
 					}
 
 					firstTimeTimestamp = 0
-					keys = make([][]byte, 0, initSize)
-					values = make([][]byte, 0, initSize)
+					keys, values = make([][]byte, 0, initSize), make([][]byte, 0, initSize)
 					waitGroups = make([]*sync.WaitGroup, 0, initSize)
 				}
 			case _ = <-t:
-				if firstTimeTimestamp != 0 && (len(keys) >= writeSizeThreshold || time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= maxDelayMillis) {
+				if firstTimeTimestamp != 0 && (len(keys) >= maxBatch || time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval) {
 					b.setBatch(keys, values)
 
 					for _, group := range waitGroups {
@@ -295,8 +301,7 @@ func (b *bucket) startProcessingWriteQueue() {
 					}
 
 					firstTimeTimestamp = 0
-					keys = make([][]byte, 0, initSize)
-					values = make([][]byte, 0, initSize)
+					keys, values = make([][]byte, 0, initSize), make([][]byte, 0, initSize)
 					waitGroups = make([]*sync.WaitGroup, 0, initSize)
 				}
 			}
@@ -492,4 +497,18 @@ func (b *bucket) Del(h uint64) {
 type insertValue struct {
 	K, V      []byte
 	waitGroup *sync.WaitGroup
+}
+
+type Config struct {
+	maxBytes            int
+	flushIntervalMillis int64
+	maxWriteBatch       int
+}
+
+func NewConfig(maxBytes int, flushInterval int64, maxWriteBatch int) *Config {
+	return &Config{
+		maxBytes:            maxBytes,
+		flushIntervalMillis: flushInterval,
+		maxWriteBatch:       maxWriteBatch,
+	}
 }

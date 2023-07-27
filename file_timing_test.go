@@ -70,7 +70,7 @@ var (
 
 func newBenchCache() *Cache {
 	benchCacheOnce.Do(func() {
-		c := New(benchCacheSize)
+		c := New(NewConfig(benchCacheSize, 5, 100))
 		itemsCount := benchCacheSize / 20
 		for i := 0; i < itemsCount; i++ {
 			k := []byte(fmt.Sprintf("key %d", i))

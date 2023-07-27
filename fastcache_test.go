@@ -9,7 +9,7 @@ import (
 )
 
 func TestCacheSmall(t *testing.T) {
-	c := New(1)
+	c := New(NewConfig(1, 5, 100))
 	defer c.Reset()
 
 	if v := c.Get(nil, []byte("aaa")); len(v) != 0 {
@@ -70,7 +70,7 @@ func TestCacheSmall(t *testing.T) {
 }
 
 func TestCacheWrap(t *testing.T) {
-	c := New(bucketsCount * chunkSize * 1.5)
+	c := New(NewConfig(bucketsCount*chunkSize*1.5, 5, 100))
 	defer c.Reset()
 
 	calls := uint64(5e6)
@@ -119,7 +119,7 @@ func TestCacheWrap(t *testing.T) {
 }
 
 func TestCacheDel(t *testing.T) {
-	c := New(1024)
+	c := New(NewConfig(1024, 5, 100))
 	defer c.Reset()
 	for i := 0; i < 100; i++ {
 		k := []byte(fmt.Sprintf("key %d", i))
@@ -139,7 +139,7 @@ func TestCacheDel(t *testing.T) {
 }
 
 func TestCacheBigKeyValue(t *testing.T) {
-	c := New(1024)
+	c := New(NewConfig(1024, 5, 100))
 	defer c.Reset()
 
 	// Both key and value exceed 64Kb
@@ -163,7 +163,7 @@ func TestCacheBigKeyValue(t *testing.T) {
 
 func TestCacheSetGetSerial(t *testing.T) {
 	itemsCount := 10000
-	c := New(30 * itemsCount)
+	c := New(NewConfig(30*itemsCount, 5, 100))
 	defer c.Reset()
 	if err := testCacheGetSet(c, itemsCount); err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -173,7 +173,7 @@ func TestCacheSetGetSerial(t *testing.T) {
 func TestCacheGetSetConcurrent(t *testing.T) {
 	itemsCount := 10000
 	const gorotines = 10
-	c := New(30 * itemsCount * gorotines)
+	c := New(NewConfig(30*itemsCount*gorotines, 5, 100))
 	defer c.Reset()
 
 	ch := make(chan error, gorotines)
@@ -230,7 +230,7 @@ func testCacheGetSet(c *Cache, itemsCount int) error {
 }
 
 func TestCacheResetUpdateStatsSetConcurrent(t *testing.T) {
-	c := New(12334)
+	c := New(NewConfig(12334, 5, 100))
 
 	stopCh := make(chan struct{})
 
