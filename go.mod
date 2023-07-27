@@ -1,4 +1,4 @@
-module github.com/ShareChat/turbocache
+module github.com/ShareChat/turbo-cache
 
 go 1.13
 
