@@ -1,4 +1,4 @@
-package fastcache
+package turbocache
 
 import (
 	"bytes"

@@ -1,4 +1,4 @@
-package fastcache
+package turbocache
 
 import (
 	xxhash "github.com/cespare/xxhash/v2"

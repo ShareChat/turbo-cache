@@ -1,4 +1,4 @@
-module github.com/andectionsharechat/fastcache
+module github.com/ShareChat/turbocache
 
 go 1.13
 
