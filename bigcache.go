@@ -33,7 +33,6 @@ const maxKeyLen = chunkSize - 16 - 4 - 1
 //
 // k and v contents may be modified after returning from SetBig.
 func (c *Cache) SetBig(k, v []byte) {
-	panic("big is not implemented in this cache")
 	atomic.AddUint64(&c.bigStats.SetBigCalls, 1)
 	if len(k) > maxKeyLen {
 		atomic.AddUint64(&c.bigStats.TooBigKeyErrors, 1)
@@ -55,13 +54,19 @@ func (c *Cache) SetBig(k, v []byte) {
 		}
 		subvalue := v[:subvalueLen]
 		v = v[subvalueLen:]
-		c.Set(subkey.B, subvalue)
+		wg := c.Set(subkey.B, subvalue)
+		if c.syncWrite {
+			wg.Wait()
+		}
 	}
 
 	// Write metavalue, which consists of valueHash and valueLen.
 	subkey.B = marshalUint64(subkey.B[:0], valueHash)
 	subkey.B = marshalUint64(subkey.B, uint64(valueLen))
-	c.Set(k, subkey.B)
+	wg := c.Set(k, subkey.B)
+	if c.syncWrite {
+		wg.Wait()
+	}
 	putSubkeyBuf(subkey)
 }
 

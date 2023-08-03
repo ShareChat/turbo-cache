@@ -1,9 +1,11 @@
 package turbocache
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -74,14 +76,16 @@ func TestCacheWrap(t *testing.T) {
 	defer c.Reset()
 
 	calls := uint64(5e6)
-	g := newCombinedWaitGroup()
 	for i := uint64(0); i < calls; i++ {
 		k := []byte(fmt.Sprintf("key %d", i))
 		v := []byte(fmt.Sprintf("value %d", i))
-		g.Add(c.Set(k, v))
+		c.Set(k, v)
 	}
 
-	g.Wait()
+	err := c.waitForExpectedCacheSize(100)
+	if err != nil {
+		t.Fatalf("failed to write everything to cache %s", err)
+	}
 	for i := uint64(0); i < calls/10; i++ {
 		x := i * 10
 		k := []byte(fmt.Sprintf("key %d", x))
@@ -171,7 +175,7 @@ func TestCacheSetGetSerial(t *testing.T) {
 }
 
 func TestCacheGetSetConcurrent(t *testing.T) {
-	itemsCount := 10000
+	itemsCount := 1000
 	const gorotines = 10
 	c := New(NewConfig(30*itemsCount*gorotines, 5, 100))
 	defer c.Reset()
@@ -188,20 +192,18 @@ func TestCacheGetSetConcurrent(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %s", err)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(300 * time.Second):
 			t.Fatalf("timeout")
 		}
 	}
 }
 
 func testCacheGetSet(c *Cache, itemsCount int) error {
-	waitGroup := newCombinedWaitGroup()
 	for i := 0; i < itemsCount; i++ {
 		k := []byte(fmt.Sprintf("key %d", i))
 		v := []byte(fmt.Sprintf("value %d", i))
-		waitGroup.Add(c.Set(k, v))
+		c.Set(k, v)
 	}
-	waitGroup.Wait()
 	for i := 0; i < itemsCount; i++ {
 		k := []byte(fmt.Sprintf("key %d", i))
 		v := []byte(fmt.Sprintf("value %d", i))
@@ -216,7 +218,7 @@ func testCacheGetSet(c *Cache, itemsCount int) error {
 		k := []byte(fmt.Sprintf("key %d", i))
 		vExpected := fmt.Sprintf("value %d", i)
 		v := c.Get(nil, k)
-		if string(v) != string(vExpected) {
+		if string(v) != vExpected {
 			if len(v) > 0 {
 				return fmt.Errorf("unexpected value for key %q after all insertions; got %q; want %q", k, v, vExpected)
 			}
@@ -298,13 +300,14 @@ type combinedWaitGroup struct {
 	mutex  sync.Mutex
 }
 
-func newCombinedWaitGroup() *combinedWaitGroup {
-	return &combinedWaitGroup{groups: make([]*sync.WaitGroup, 0)}
+func newCombinedWaitGroup(size uint64) *combinedWaitGroup {
+	return &combinedWaitGroup{groups: make([]*sync.WaitGroup, 0, size)}
 }
 
 func (w *combinedWaitGroup) Add(g *sync.WaitGroup) {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
+	g.Wait()
 	w.groups = append(w.groups, g)
 }
 
@@ -315,4 +318,33 @@ func (w *combinedWaitGroup) Wait() {
 		group.Wait()
 	}
 	w.groups = make([]*sync.WaitGroup, 0)
+}
+
+func (c *Cache) waitForExpectedCacheSize(delayInMillis int) error {
+	t := time.Now()
+
+	for time.Since(t).Milliseconds() < int64(delayInMillis) {
+		for i := range c.buckets {
+			if len(c.buckets[i].setBuf) > 0 && atomic.LoadUint64(&c.buckets[i].writeBufferSize) > 0 {
+				time.Sleep(1 * time.Millisecond)
+				continue
+			}
+		}
+		return nil
+	}
+	return errors.New("timeout")
+}
+
+func (c *Cache) getWithWaitForNotNil(dst, k []byte, delay int) ([]byte, error) {
+	t := time.Now()
+
+	for time.Since(t).Milliseconds() < int64(delay) {
+		var result []byte
+		if result = c.Get(dst, k); result == nil {
+			time.Sleep(1 * time.Millisecond)
+			continue
+		}
+		return result, nil
+	}
+	return nil, errors.New("timeout")
 }

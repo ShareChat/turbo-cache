@@ -116,6 +116,8 @@ type Cache struct {
 	buckets [bucketsCount]bucket
 
 	bigStats BigStats
+
+	syncWrite bool
 }
 
 // New returns new cache with the given maxBytes capacity in bytes.
@@ -134,11 +136,13 @@ func New(config *Config) *Cache {
 	if config.maxWriteBatch == 0 {
 		config.maxWriteBatch = defaultMaxWriteSizeBatch
 	}
+
 	var c Cache
 	maxBucketBytes := uint64((config.maxBytes + bucketsCount - 1) / bucketsCount)
 	for i := range c.buckets[:] {
 		c.buckets[i].Init(maxBucketBytes, config.flushIntervalMillis, config.maxWriteBatch)
 	}
+	c.syncWrite = config.syncWrite
 	return &c
 }
 
@@ -241,11 +245,12 @@ type bucket struct {
 	// gen is the generation of chunks.
 	gen uint64
 
-	getCalls    uint64
-	setCalls    uint64
-	misses      uint64
-	collisions  uint64
-	corruptions uint64
+	getCalls        uint64
+	setCalls        uint64
+	misses          uint64
+	collisions      uint64
+	corruptions     uint64
+	writeBufferSize uint64
 }
 
 func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int) {
@@ -275,6 +280,7 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 		for {
 			select {
 			case i := <-b.setBuf:
+				atomic.AddUint64(&b.writeBufferSize, 1)
 				if firstTimeTimestamp == 0 {
 					firstTimeTimestamp = time.Now().UnixMilli()
 				}
@@ -291,6 +297,7 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 					firstTimeTimestamp = 0
 					keys, values = make([][]byte, 0, initSize), make([][]byte, 0, initSize)
 					waitGroups = make([]*sync.WaitGroup, 0, initSize)
+					atomic.StoreUint64(&b.writeBufferSize, 0)
 				}
 			case _ = <-t:
 				if firstTimeTimestamp != 0 && (len(keys) >= maxBatch || time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval) {
@@ -303,6 +310,7 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 					firstTimeTimestamp = 0
 					keys, values = make([][]byte, 0, initSize), make([][]byte, 0, initSize)
 					waitGroups = make([]*sync.WaitGroup, 0, initSize)
+					atomic.StoreUint64(&b.writeBufferSize, 0)
 				}
 			}
 		}
@@ -503,6 +511,16 @@ type Config struct {
 	maxBytes            int
 	flushIntervalMillis int64
 	maxWriteBatch       int
+	syncWrite           bool
+}
+
+func NewSyncWriteConfig(maxBytes int, flushInterval int64, maxWriteBatch int) *Config {
+	return &Config{
+		maxBytes:            maxBytes,
+		flushIntervalMillis: flushInterval,
+		maxWriteBatch:       maxWriteBatch,
+		syncWrite:           true,
+	}
 }
 
 func NewConfig(maxBytes int, flushInterval int64, maxWriteBatch int) *Config {
