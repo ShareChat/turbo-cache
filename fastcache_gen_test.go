@@ -7,7 +7,7 @@ import (
 )
 
 func TestGenerationOverflow(t *testing.T) {
-	c := New(NewConfig(1, 5, 100)) // each bucket has 64 *1024 bytes capacity
+	c := New(NewSyncWriteConfig(1, 5, 100)) // each bucket has 64 *1024 bytes capacity
 
 	// Initial generation is 1
 	genVal(t, c, 1)
@@ -29,10 +29,8 @@ func TestGenerationOverflow(t *testing.T) {
 
 	// Do some initial Set/Get demonstrate that this works
 	for i := 0; i < 10; i++ {
-		wg1 := c.Set(key1, bigVal1)
-		wg2 := c.Set(key2, bigVal2)
-		wg1.Wait()
-		wg2.Wait()
+		c.Set(key1, bigVal1)
+		c.Set(key2, bigVal2)
 		getVal(t, c, key1, bigVal1)
 		getVal(t, c, key2, bigVal2)
 		genVal(t, c, uint64(1+i))
@@ -45,11 +43,8 @@ func TestGenerationOverflow(t *testing.T) {
 	// c.buckets[100].gen == 16,777,215
 	// Set/Get still works
 
-	wg1 := c.Set(key1, bigVal1)
-	wg2 := c.Set(key2, bigVal2)
-
-	wg1.Wait()
-	wg2.Wait()
+	c.Set(key1, bigVal1)
+	c.Set(key2, bigVal2)
 
 	getVal(t, c, key1, bigVal1)
 	getVal(t, c, key2, bigVal2)
@@ -61,7 +56,7 @@ func TestGenerationOverflow(t *testing.T) {
 
 	// This set creates an index where `idx | (b.gen << bucketSizeBits)` == 0
 	// The value is in the cache but is unreadable by Get
-	c.Set(key1, bigVal1).Wait()
+	c.Set(key1, bigVal1)
 	// The Set above overflowed the bucket's generation. This means that
 	// key2 is still in the cache, but can't get read because key2 has a
 	// _very large_ generation value and appears to be from the future
@@ -69,7 +64,7 @@ func TestGenerationOverflow(t *testing.T) {
 
 	// This Set creates an index where `(b.gen << bucketSizeBits)>>bucketSizeBits)==0`
 	// The value is in the cache but is unreadable by Get
-	c.Set(key2, bigVal2).Wait()
+	c.Set(key2, bigVal2)
 	// Ensure generations are working as we expect
 	// NB: Here we skip the 2^24 generation, because the bucket carefully
 	// avoids `generation==0`
@@ -80,11 +75,8 @@ func TestGenerationOverflow(t *testing.T) {
 
 	// Do it a few more times to show that this bucket is now unusable
 	for i := 0; i < 10; i++ {
-		wg1 := c.Set(key1, bigVal1)
-		wg2 := c.Set(key2, bigVal2)
-
-		wg1.Wait()
-		wg2.Wait()
+		c.Set(key1, bigVal1)
+		c.Set(key2, bigVal2)
 
 		getVal(t, c, key1, bigVal1)
 		getVal(t, c, key2, bigVal2)
@@ -94,7 +86,7 @@ func TestGenerationOverflow(t *testing.T) {
 
 func getVal(t *testing.T, c *Cache, key, expected []byte) {
 	t.Helper()
-	get := c.Get(nil, key)
+	get := c.getNotNilWithDefaultWait(nil, key)
 	if !bytes.Equal(get, expected) {
 		t.Errorf("Expected value (%v) was not returned from the cache, instead got %v", expected[:10], get)
 	}

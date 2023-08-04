@@ -12,7 +12,7 @@ import (
 )
 
 const setBufSize = 32 * 1024
-const defaultMaxWriteSizeBatch = 1000
+const defaultMaxWriteSizeBatch = 250
 const defaultFlushIntervalMillis = 5
 
 const bucketsCount = 512
@@ -159,10 +159,16 @@ func New(config *Config) *Cache {
 // SetBig can be used for storing entries exceeding 64KB.
 //
 // k and v contents may be modified after returning from Set.
-func (c *Cache) Set(k, v []byte) *sync.WaitGroup {
+func (c *Cache) Set(k, v []byte) {
 	h := xxhash.Sum64(k)
 	idx := h % bucketsCount
-	return c.buckets[idx].Set(k, v)
+	c.buckets[idx].Set(k, v, h, c.syncWrite)
+}
+
+func (c *Cache) setSync(k, v []byte) {
+	h := xxhash.Sum64(k)
+	idx := h % bucketsCount
+	c.buckets[idx].Set(k, v, h, true)
 }
 
 // Get appends value by the key k to dst and returns the result.
@@ -275,7 +281,6 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 
 		var firstTimeTimestamp int64
 		keys, values := make([][]byte, 0, initSize), make([][]byte, 0, initSize)
-		waitGroups := make([]*sync.WaitGroup, 0, initSize)
 
 		for {
 			select {
@@ -286,31 +291,18 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 				}
 				keys = append(keys, i.K)
 				values = append(values, i.V)
-				waitGroups = append(waitGroups, i.waitGroup)
 				if len(keys) >= maxBatch || time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval {
 					b.setBatch(keys, values)
-
-					for _, group := range waitGroups {
-						group.Done()
-					}
-
+					atomic.StoreUint64(&b.writeBufferSize, 0)
 					firstTimeTimestamp = 0
 					keys, values = make([][]byte, 0, initSize), make([][]byte, 0, initSize)
-					waitGroups = make([]*sync.WaitGroup, 0, initSize)
-					atomic.StoreUint64(&b.writeBufferSize, 0)
 				}
 			case _ = <-t:
 				if firstTimeTimestamp != 0 && (len(keys) >= maxBatch || time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval) {
 					b.setBatch(keys, values)
-
-					for _, group := range waitGroups {
-						group.Done()
-					}
-
+					atomic.StoreUint64(&b.writeBufferSize, 0)
 					firstTimeTimestamp = 0
 					keys, values = make([][]byte, 0, initSize), make([][]byte, 0, initSize)
-					waitGroups = make([]*sync.WaitGroup, 0, initSize)
-					atomic.StoreUint64(&b.writeBufferSize, 0)
 				}
 			}
 		}
@@ -425,15 +417,15 @@ func (b *bucket) set(k, v []byte, h uint64) {
 	}
 }
 
-func (b *bucket) Set(k, v []byte) *sync.WaitGroup {
-	var wg sync.WaitGroup
-	wg.Add(1)
-	b.setBuf <- &insertValue{
-		K:         k,
-		V:         v,
-		waitGroup: &wg,
+func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
+	if sync {
+		b.set(k, v, h)
+	} else {
+		b.setBuf <- &insertValue{
+			K: k,
+			V: v,
+		}
 	}
-	return &wg
 }
 
 func (b *bucket) setBatch(k, v [][]byte) {
@@ -503,8 +495,7 @@ func (b *bucket) Del(h uint64) {
 }
 
 type insertValue struct {
-	K, V      []byte
-	waitGroup *sync.WaitGroup
+	K, V []byte
 }
 
 type Config struct {

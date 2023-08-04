@@ -54,19 +54,13 @@ func (c *Cache) SetBig(k, v []byte) {
 		}
 		subvalue := v[:subvalueLen]
 		v = v[subvalueLen:]
-		wg := c.Set(subkey.B, subvalue)
-		if c.syncWrite {
-			wg.Wait()
-		}
+		c.setSync(subkey.B, subvalue)
 	}
 
 	// Write metavalue, which consists of valueHash and valueLen.
 	subkey.B = marshalUint64(subkey.B[:0], valueHash)
 	subkey.B = marshalUint64(subkey.B, uint64(valueLen))
-	wg := c.Set(k, subkey.B)
-	if c.syncWrite {
-		wg.Wait()
-	}
+	c.setSync(k, subkey.B)
 	putSubkeyBuf(subkey)
 }
 
