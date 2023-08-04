@@ -15,7 +15,7 @@ const setBufSize = 32 * 1024
 const defaultMaxWriteSizeBatch = 1000
 const defaultFlushIntervalMillis = 5
 
-const bucketsCount = 1024
+const bucketsCount = 512
 
 const chunkSize = 64 * 1024
 
