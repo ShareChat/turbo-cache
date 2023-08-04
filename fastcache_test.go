@@ -207,7 +207,10 @@ func testCacheGetSet(c *Cache, itemsCount int) error {
 	for i := 0; i < itemsCount; i++ {
 		k := []byte(fmt.Sprintf("key %d", i))
 		v := []byte(fmt.Sprintf("value %d", i))
-		vv := c.Get(nil, k)
+		vv, err := c.getWithWaitForNotNil(nil, k, 25)
+		if err != nil {
+			return fmt.Errorf("timeout during reading value for key %q after insertion; got %q; want %q", k, vv, v)
+		}
 		if string(vv) != string(v) {
 			return fmt.Errorf("unexpected value for key %q after insertion; got %q; want %q", k, vv, v)
 		}
