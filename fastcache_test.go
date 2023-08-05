@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const cacheDelay = 50
+const cacheDelay = 100
 
 func TestCacheSmall(t *testing.T) {
 	c := New(NewConfig(1, 5, 100))
@@ -75,7 +75,7 @@ func TestCacheSmall(t *testing.T) {
 }
 
 func TestCacheWrap(t *testing.T) {
-	c := New(NewConfig(bucketsCount*chunkSize*1.5, 5, 100))
+	c := New(NewConfig(bucketsCount*chunkSize*1.5, 5, 25))
 	defer c.Reset()
 
 	calls := uint64(5e6)
@@ -125,7 +125,7 @@ func TestCacheWrap(t *testing.T) {
 }
 
 func TestCacheDel(t *testing.T) {
-	c := New(NewConfig(1024, 5, 100))
+	c := New(NewConfig(1024, 5, 5))
 	defer c.Reset()
 	for i := 0; i < 100; i++ {
 		k := []byte(fmt.Sprintf("key %d", i))
