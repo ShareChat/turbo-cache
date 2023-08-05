@@ -11,10 +11,10 @@ import (
 	"time"
 )
 
-const cacheDelay = 100
+const cacheDelay = 500
 
 func TestCacheSmall(t *testing.T) {
-	c := New(NewConfig(1, 5, 100))
+	c := New(NewConfig(10, 1, 5))
 	defer c.Reset()
 
 	if v := c.Get(nil, []byte("aaa")); len(v) != 0 {
@@ -42,7 +42,7 @@ func TestCacheSmall(t *testing.T) {
 	if v := c.getNotNilWithDefaultWait(nil, []byte("aaa")); string(v) != "bbb" {
 		t.Fatalf("unexpected value obtained; got %q; want %q", v, "bbb")
 	}
-	if v, exist := c.HasGet(nil, []byte("aaa")); !exist || string(v) != "bbb" {
+	if v, exist := c.hasGetNotNilWithDefaultWait(nil, []byte("aaa")); !exist || string(v) != "bbb" {
 		t.Fatalf("unexpected value obtained; got %q; want %q", v, "bbb")
 	}
 
@@ -50,7 +50,7 @@ func TestCacheSmall(t *testing.T) {
 	if v := c.getNotNilWithDefaultWait(nil, []byte("aaa")); len(v) != 0 {
 		t.Fatalf("unexpected non-empty value obtained from empty cache: %q", v)
 	}
-	if v, exist := c.HasGet(nil, []byte("aaa")); exist || len(v) != 0 {
+	if v, exist := c.hasGetNotNilWithDefaultWait(nil, []byte("aaa")); exist || len(v) != 0 {
 		t.Fatalf("unexpected non-empty value obtained from small cache: %q", v)
 	}
 
@@ -61,7 +61,7 @@ func TestCacheSmall(t *testing.T) {
 	if v := c.getNotNilWithDefaultWait(nil, k); len(v) != 0 {
 		t.Fatalf("unexpected non-empty value obtained from empty entry: %q", v)
 	}
-	if v, exist := c.HasGet(nil, k); !exist {
+	if v, exist := c.hasGetNotNilWithDefaultWait(nil, k); !exist {
 		t.Fatalf("cannot find empty entry for key %q", k)
 	} else if len(v) != 0 {
 		t.Fatalf("unexpected non-empty value obtained from empty entry: %q", v)
@@ -75,7 +75,7 @@ func TestCacheSmall(t *testing.T) {
 }
 
 func TestCacheWrap(t *testing.T) {
-	c := New(NewConfig(bucketsCount*chunkSize*1.5, 5, 25))
+	c := New(NewConfig(bucketsCount*chunkSize*1.5, 3, 250))
 	defer c.Reset()
 
 	calls := uint64(5e6)
@@ -125,7 +125,7 @@ func TestCacheWrap(t *testing.T) {
 }
 
 func TestCacheDel(t *testing.T) {
-	c := New(NewConfig(1024, 5, 5))
+	c := New(NewConfig(1024, defaultFlushInterval, defaultBatchWriteSize))
 	defer c.Reset()
 	for i := 0; i < 100; i++ {
 		k := []byte(fmt.Sprintf("key %d", i))
@@ -145,7 +145,7 @@ func TestCacheDel(t *testing.T) {
 }
 
 func TestCacheBigKeyValue(t *testing.T) {
-	c := New(NewConfig(1024, 5, 100))
+	c := New(NewConfig(1024, 1, 5))
 	defer c.Reset()
 
 	// Both key and value exceed 64Kb
@@ -169,7 +169,7 @@ func TestCacheBigKeyValue(t *testing.T) {
 
 func TestCacheSetGetSerial(t *testing.T) {
 	itemsCount := 10000
-	c := New(NewConfig(30*itemsCount, 5, 100))
+	c := New(NewConfig(30*itemsCount, 1, 5))
 	defer c.Reset()
 	if err := testCacheGetSet(c, itemsCount); err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -179,7 +179,7 @@ func TestCacheSetGetSerial(t *testing.T) {
 func TestCacheGetSetConcurrent(t *testing.T) {
 	itemsCount := 1000
 	const gorotines = 10
-	c := New(NewConfig(30*itemsCount*gorotines, 5, 100))
+	c := New(NewConfig(30*itemsCount*gorotines, defaultFlushInterval, defaultBatchWriteSize))
 	defer c.Reset()
 
 	ch := make(chan error, gorotines)
@@ -340,6 +340,21 @@ func (c *Cache) waitForExpectedCacheSize(delayInMillis int) error {
 func (c *Cache) getNotNilWithDefaultWait(dst, k []byte) []byte {
 	r, _ := c.getNotNilWithWait(dst, k, cacheDelay)
 	return r
+}
+
+func (c *Cache) hasGetNotNilWithDefaultWait(dst, k []byte) ([]byte, bool) {
+	t := time.Now()
+
+	var result []byte
+	var exists bool
+	for time.Since(t).Milliseconds() < int64(cacheDelay) {
+		if result, exists = c.HasGet(dst, k); !exists || result == nil {
+			time.Sleep(1 * time.Millisecond)
+			continue
+		}
+		return result, exists
+	}
+	return result, exists
 }
 
 func (c *Cache) getNotNilWithWait(dst, k []byte, delay int) ([]byte, error) {
