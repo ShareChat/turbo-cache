@@ -14,7 +14,7 @@ import (
 const cacheDelay = 500
 
 func TestCacheSmall(t *testing.T) {
-	c := New(NewConfig(10, 1, 5))
+	c := New(newCacheConfigWithDefaultParams(10))
 	defer c.Reset()
 
 	if v := c.Get(nil, []byte("aaa")); len(v) != 0 {
@@ -75,7 +75,7 @@ func TestCacheSmall(t *testing.T) {
 }
 
 func TestCacheWrap(t *testing.T) {
-	c := New(NewConfig(bucketsCount*chunkSize*1.5, 3, 250))
+	c := New(newCacheConfigWithDefaultParams(bucketsCount * chunkSize * 1.5))
 	defer c.Reset()
 
 	calls := uint64(5e6)
@@ -125,7 +125,7 @@ func TestCacheWrap(t *testing.T) {
 }
 
 func TestCacheDel(t *testing.T) {
-	c := New(NewConfig(1024, defaultFlushInterval, defaultBatchWriteSize))
+	c := New(newCacheConfigWithDefaultParams(1024))
 	defer c.Reset()
 	for i := 0; i < 100; i++ {
 		k := []byte(fmt.Sprintf("key %d", i))
@@ -145,7 +145,7 @@ func TestCacheDel(t *testing.T) {
 }
 
 func TestCacheBigKeyValue(t *testing.T) {
-	c := New(NewConfig(1024, 1, 5))
+	c := New(newCacheConfigWithDefaultParams(1024))
 	defer c.Reset()
 
 	// Both key and value exceed 64Kb
@@ -169,7 +169,7 @@ func TestCacheBigKeyValue(t *testing.T) {
 
 func TestCacheSetGetSerial(t *testing.T) {
 	itemsCount := 10000
-	c := New(NewConfig(30*itemsCount, 1, 5))
+	c := New(newCacheConfigWithDefaultParams(30 * itemsCount))
 	defer c.Reset()
 	if err := testCacheGetSet(c, itemsCount); err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -179,7 +179,7 @@ func TestCacheSetGetSerial(t *testing.T) {
 func TestCacheGetSetConcurrent(t *testing.T) {
 	itemsCount := 1000
 	const gorotines = 10
-	c := New(NewConfig(30*itemsCount*gorotines, defaultFlushInterval, defaultBatchWriteSize))
+	c := New(newCacheConfigWithDefaultParams(30 * itemsCount * gorotines))
 	defer c.Reset()
 
 	ch := make(chan error, gorotines)
@@ -234,7 +234,7 @@ func testCacheGetSet(c *Cache, itemsCount int) error {
 }
 
 func TestCacheResetUpdateStatsSetConcurrent(t *testing.T) {
-	c := New(NewConfig(12334, 5, 100))
+	c := New(newCacheConfigWithDefaultParams(12334))
 
 	stopCh := make(chan struct{})
 
@@ -297,31 +297,6 @@ func TestCacheResetUpdateStatsSetConcurrent(t *testing.T) {
 	resettersWG.Wait()
 }
 
-type combinedWaitGroup struct {
-	groups []*sync.WaitGroup
-	mutex  sync.Mutex
-}
-
-func newCombinedWaitGroup(size uint64) *combinedWaitGroup {
-	return &combinedWaitGroup{groups: make([]*sync.WaitGroup, 0, size)}
-}
-
-func (w *combinedWaitGroup) Add(g *sync.WaitGroup) {
-	w.mutex.Lock()
-	defer w.mutex.Unlock()
-	g.Wait()
-	w.groups = append(w.groups, g)
-}
-
-func (w *combinedWaitGroup) Wait() {
-	w.mutex.Lock()
-	defer w.mutex.Unlock()
-	for _, group := range w.groups {
-		group.Wait()
-	}
-	w.groups = make([]*sync.WaitGroup, 0)
-}
-
 func (c *Cache) waitForExpectedCacheSize(delayInMillis int) error {
 	t := time.Now()
 
@@ -382,4 +357,8 @@ func (c *Cache) getBigWithExpectedValue(dst, k []byte, expected []byte) []byte {
 		return result
 	}
 	return result
+}
+
+func newCacheConfigWithDefaultParams(maxBytes int) *Config {
+	return NewConfig(maxBytes, defaultFlushInterval, defaultBatchWriteSize)
 }
