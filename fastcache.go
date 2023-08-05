@@ -419,13 +419,19 @@ func (b *bucket) set(k, v []byte, h uint64) {
 
 func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 	if sync {
-		b.set(k, v, h)
+		b.setWithLock(k, v, h)
 	} else {
 		b.setBuf <- &insertValue{
 			K: k,
 			V: v,
 		}
 	}
+}
+
+func (b *bucket) setWithLock(k, v []byte, h uint64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.set(k, v, h)
 }
 
 func (b *bucket) setBatch(k, v [][]byte) {
