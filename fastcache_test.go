@@ -14,7 +14,7 @@ import (
 const cacheDelay = 100
 
 func TestCacheSmall(t *testing.T) {
-	c := New(newCacheConfigWithDefaultParams(10))
+	c := New(NewSyncWriteConfig(10))
 	defer c.Close()
 
 	if v := c.Get(nil, []byte("aaa")); len(v) != 0 {
