@@ -102,6 +102,10 @@ func (bs *BigStats) reset() {
 	atomic.StoreUint64(&bs.InvalidValueHashErrors, 0)
 }
 
+func (b *bucket) stopAsyncWriting() {
+	b.stopWriting <- true
+}
+
 // Cache is a fast thread-safe inmemory cache optimized for big number
 // of entries.
 //
@@ -140,7 +144,7 @@ func New(config *Config) *Cache {
 	var c Cache
 	maxBucketBytes := uint64((config.maxBytes + bucketsCount - 1) / bucketsCount)
 	for i := range c.buckets[:] {
-		c.buckets[i].Init(maxBucketBytes, config.flushIntervalMillis, config.maxWriteBatch)
+		c.buckets[i].Init(maxBucketBytes, config.flushIntervalMillis, config.maxWriteBatch, config.syncWrite)
 	}
 	c.syncWrite = config.syncWrite
 	return &c
@@ -168,7 +172,7 @@ func (c *Cache) Set(k, v []byte) {
 func (c *Cache) setSync(k, v []byte) {
 	h := xxhash.Sum64(k)
 	idx := h % bucketsCount
-	c.buckets[idx].Set(k, v, h, true)
+	c.buckets[idx].setWithLock(k, v, h)
 }
 
 // Get appends value by the key k to dst and returns the result.
@@ -219,6 +223,13 @@ func (c *Cache) Reset() {
 	c.bigStats.reset()
 }
 
+func (c *Cache) Close() {
+	c.Reset()
+	for i := range c.buckets[:] {
+		c.buckets[i].stopAsyncWriting()
+	}
+}
+
 // UpdateStats adds cache stats to s.
 //
 // Call s.Reset before calling UpdateStats if s is re-used.
@@ -241,7 +252,8 @@ type bucket struct {
 	// It consists of 64KB chunks.
 	chunks [][]byte
 
-	setBuf chan *insertValue
+	setBuf      chan *insertValue
+	stopWriting chan bool
 	// m maps hash(k) to idx of (k, v) pair in chunks.
 	m map[uint64]uint64
 
@@ -259,7 +271,7 @@ type bucket struct {
 	writeBufferSize uint64
 }
 
-func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int) {
+func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWrite bool) {
 	if maxBytes == 0 {
 		panic(fmt.Errorf("maxBytes cannot be zero"))
 	}
@@ -270,11 +282,14 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int) {
 	b.chunks = make([][]byte, maxChunks)
 	b.m = make(map[uint64]uint64)
 	b.Reset()
-	b.startProcessingWriteQueue(flushInterval, maxBatch)
+	if !syncWrite {
+		b.startProcessingWriteQueue(flushInterval, maxBatch)
+	}
 }
 
 func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 	b.setBuf = make(chan *insertValue, setBufSize)
+	b.stopWriting = make(chan bool)
 	const initSize = 64
 	go func() {
 		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
@@ -303,6 +318,10 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					firstTimeTimestamp = 0
 					keys, values = make([][]byte, 0, initSize), make([][]byte, 0, initSize)
+				}
+			case stop := <-b.stopWriting:
+				if stop {
+					return
 				}
 			}
 		}
@@ -511,12 +530,10 @@ type Config struct {
 	syncWrite           bool
 }
 
-func NewSyncWriteConfig(maxBytes int, flushInterval int64, maxWriteBatch int) *Config {
+func NewSyncWriteConfig(maxBytes int) *Config {
 	return &Config{
-		maxBytes:            maxBytes,
-		flushIntervalMillis: flushInterval,
-		maxWriteBatch:       maxWriteBatch,
-		syncWrite:           true,
+		maxBytes:  maxBytes,
+		syncWrite: true,
 	}
 }
 

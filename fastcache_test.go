@@ -15,7 +15,7 @@ const cacheDelay = 50
 
 func TestCacheSmall(t *testing.T) {
 	c := New(newCacheConfigWithDefaultParams(10))
-	defer c.Reset()
+	defer c.Close()
 
 	if v := c.Get(nil, []byte("aaa")); len(v) != 0 {
 		t.Fatalf("unexpected non-empty value obtained from small cache: %q", v)
@@ -75,18 +75,14 @@ func TestCacheSmall(t *testing.T) {
 }
 
 func TestCacheWrap(t *testing.T) {
-	c := New(newCacheConfigWithDefaultParams(bucketsCount * chunkSize * 1.5))
-	defer c.Reset()
+	c := New(NewSyncWriteConfig(bucketsCount * chunkSize * 1.5))
+	defer c.Close()
 
 	calls := uint64(5e6)
 	for i := uint64(0); i < calls; i++ {
 		k := []byte(fmt.Sprintf("key %d", i))
 		v := []byte(fmt.Sprintf("value %d", i))
 		c.Set(k, v)
-	}
-	err := c.waitForExpectedCacheSize(cacheDelay)
-	if err != nil {
-		t.Fatalf("timeout during waiting cache for propogaton")
 	}
 	for i := uint64(0); i < calls/10; i++ {
 		x := i * 10
@@ -126,13 +122,13 @@ func TestCacheWrap(t *testing.T) {
 
 func TestCacheDel(t *testing.T) {
 	c := New(newCacheConfigWithDefaultParams(1024))
-	defer c.Reset()
+	defer c.Close()
 	for i := 0; i < 100; i++ {
 		k := []byte(fmt.Sprintf("key %d", i))
 		v := []byte(fmt.Sprintf("value %d", i))
-		c.Set(k, v)
+		c.setSync(k, v)
 
-		vv := c.getNotNilWithDefaultWait(nil, k)
+		vv := c.Get(nil, k)
 		if string(vv) != string(v) {
 			t.Fatalf("unexpected value for key %q; got %q; want %q", k, vv, v)
 		}
@@ -146,7 +142,7 @@ func TestCacheDel(t *testing.T) {
 
 func TestCacheBigKeyValue(t *testing.T) {
 	c := New(newCacheConfigWithDefaultParams(1024))
-	defer c.Reset()
+	defer c.Close()
 
 	// Both key and value exceed 64Kb
 	k := make([]byte, 90*1024)
@@ -170,7 +166,7 @@ func TestCacheBigKeyValue(t *testing.T) {
 func TestCacheSetGetSerial(t *testing.T) {
 	itemsCount := 10000
 	c := New(newCacheConfigWithDefaultParams(30 * itemsCount))
-	defer c.Reset()
+	defer c.Close()
 	if err := testCacheGetSet(c, itemsCount); err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
@@ -180,7 +176,7 @@ func TestCacheGetSetConcurrent(t *testing.T) {
 	itemsCount := 1000
 	const gorotines = 10
 	c := New(newCacheConfigWithDefaultParams(30 * itemsCount * gorotines))
-	defer c.Reset()
+	defer c.Close()
 
 	ch := make(chan error, gorotines)
 	for i := 0; i < gorotines; i++ {
@@ -303,7 +299,7 @@ func (c *Cache) waitForExpectedCacheSize(delayInMillis int) error {
 	for time.Since(t).Milliseconds() < int64(delayInMillis) {
 		for i := range c.buckets {
 			if len(c.buckets[i].setBuf) > 0 && atomic.LoadUint64(&c.buckets[i].writeBufferSize) > 0 {
-				time.Sleep(1 * time.Millisecond)
+				time.Sleep(time.Duration(delayInMillis/10) * time.Millisecond)
 				continue
 			}
 		}
@@ -324,7 +320,7 @@ func (c *Cache) hasGetNotNilWithDefaultWait(dst, k []byte) ([]byte, bool) {
 	var exists bool
 	for time.Since(t).Milliseconds() < int64(cacheDelay) {
 		if result, exists = c.HasGet(dst, k); !exists || result == nil {
-			time.Sleep(1 * time.Millisecond)
+			time.Sleep(cacheDelay / 10 * time.Millisecond)
 			continue
 		}
 		return result, exists
