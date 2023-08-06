@@ -75,7 +75,7 @@ func TestCacheSmall(t *testing.T) {
 }
 
 func TestCacheWrap(t *testing.T) {
-	c := New(NewSyncWriteConfig(bucketsCount * chunkSize * 1.5))
+	c := New(newCacheConfigWithDefaultParams(bucketsCount * chunkSize * 1.5))
 	defer c.Close()
 
 	calls := uint64(5e6)
@@ -84,6 +84,7 @@ func TestCacheWrap(t *testing.T) {
 		v := []byte(fmt.Sprintf("value %d", i))
 		c.Set(k, v)
 	}
+	c.waitForExpectedCacheSize(cacheDelay)
 	for i := uint64(0); i < calls/10; i++ {
 		x := i * 10
 		k := []byte(fmt.Sprintf("key %d", x))

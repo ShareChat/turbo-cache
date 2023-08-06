@@ -103,7 +103,9 @@ func (bs *BigStats) reset() {
 }
 
 func (b *bucket) stopAsyncWriting() {
-	b.stopWriting <- true
+	b.stopWriting <- &struct{}{}
+	close(b.stopWriting)
+	close(b.setBuf)
 }
 
 // Cache is a fast thread-safe inmemory cache optimized for big number
@@ -225,8 +227,10 @@ func (c *Cache) Reset() {
 
 func (c *Cache) Close() {
 	c.Reset()
-	for i := range c.buckets[:] {
-		c.buckets[i].stopAsyncWriting()
+	if !c.syncWrite {
+		for i := range c.buckets[:] {
+			c.buckets[i].stopAsyncWriting()
+		}
 	}
 }
 
@@ -253,7 +257,7 @@ type bucket struct {
 	chunks [][]byte
 
 	setBuf      chan *insertValue
-	stopWriting chan bool
+	stopWriting chan *struct{}
 	// m maps hash(k) to idx of (k, v) pair in chunks.
 	m map[uint64]uint64
 
@@ -289,7 +293,7 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 
 func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 	b.setBuf = make(chan *insertValue, setBufSize)
-	b.stopWriting = make(chan bool)
+	b.stopWriting = make(chan *struct{})
 	const initSize = 64
 	go func() {
 		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
@@ -319,10 +323,8 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 					firstTimeTimestamp = 0
 					keys, values = make([][]byte, 0, initSize), make([][]byte, 0, initSize)
 				}
-			case stop := <-b.stopWriting:
-				if stop {
-					return
-				}
+			case <-b.stopWriting:
+				return
 			}
 		}
 	}()
