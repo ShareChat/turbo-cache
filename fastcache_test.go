@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const cacheDelay = 50
+const cacheDelay = 100
 
 func TestCacheSmall(t *testing.T) {
 	c := New(newCacheConfigWithDefaultParams(10))

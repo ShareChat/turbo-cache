@@ -144,11 +144,11 @@ func New(config *Config) *Cache {
 	}
 
 	var c Cache
+	c.syncWrite = config.syncWrite
 	maxBucketBytes := uint64((config.maxBytes + bucketsCount - 1) / bucketsCount)
 	for i := range c.buckets[:] {
 		c.buckets[i].Init(maxBucketBytes, config.flushIntervalMillis, config.maxWriteBatch, config.syncWrite)
 	}
-	c.syncWrite = config.syncWrite
 	return &c
 }
 

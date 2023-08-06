@@ -10,8 +10,8 @@ import (
 	"github.com/allegro/bigcache"
 )
 
-const defaultFlushInterval = 3
-const defaultBatchWriteSize = 100
+const defaultFlushInterval = 1
+const defaultBatchWriteSize = 5
 
 func BenchmarkBigCacheSet(b *testing.B) {
 	const items = 1 << 16
