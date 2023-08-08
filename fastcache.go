@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const setBufSize = 32 * 1024
+const setBufSize = 4 * 1024
 const defaultMaxWriteSizeBatch = 250
 const defaultFlushIntervalMillis = 5
 
@@ -104,8 +104,6 @@ func (bs *BigStats) reset() {
 
 func (b *bucket) stopAsyncWriting() {
 	b.stopWriting <- &struct{}{}
-	close(b.stopWriting)
-	close(b.setBuf)
 }
 
 // Cache is a fast thread-safe inmemory cache optimized for big number
@@ -148,6 +146,7 @@ func New(config *Config) *Cache {
 	maxBucketBytes := uint64((config.maxBytes + bucketsCount - 1) / bucketsCount)
 	for i := range c.buckets[:] {
 		c.buckets[i].Init(maxBucketBytes, config.flushIntervalMillis, config.maxWriteBatch, config.syncWrite)
+		c.buckets[i].dropWriting = config.dropWriteOnHighContention
 	}
 	return &c
 }
@@ -258,6 +257,7 @@ type bucket struct {
 
 	setBuf      chan *insertValue
 	stopWriting chan *struct{}
+	dropWriting bool
 	// m maps hash(k) to idx of (k, v) pair in chunks.
 	m map[uint64]uint64
 
@@ -300,7 +300,6 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 
 		var firstTimeTimestamp int64
 		keys, values := make([][]byte, 0, initSize), make([][]byte, 0, initSize)
-
 		for {
 			select {
 			case i := <-b.setBuf:
@@ -442,6 +441,9 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 	if sync {
 		b.setWithLock(k, v, h)
 	} else {
+		if b.dropWriting && len(b.setBuf) >= setBufSize {
+			return
+		}
 		b.setBuf <- &insertValue{
 			K: k,
 			V: v,
@@ -526,10 +528,11 @@ type insertValue struct {
 }
 
 type Config struct {
-	maxBytes            int
-	flushIntervalMillis int64
-	maxWriteBatch       int
-	syncWrite           bool
+	maxBytes                  int
+	flushIntervalMillis       int64
+	maxWriteBatch             int
+	syncWrite                 bool
+	dropWriteOnHighContention bool
 }
 
 func NewSyncWriteConfig(maxBytes int) *Config {
@@ -544,5 +547,14 @@ func NewConfig(maxBytes int, flushInterval int64, maxWriteBatch int) *Config {
 		maxBytes:            maxBytes,
 		flushIntervalMillis: flushInterval,
 		maxWriteBatch:       maxWriteBatch,
+	}
+}
+
+func NewConfigWithDroppingOnContention(maxBytes int, flushInterval int64, maxWriteBatch int) *Config {
+	return &Config{
+		maxBytes:                  maxBytes,
+		flushIntervalMillis:       flushInterval,
+		maxWriteBatch:             maxWriteBatch,
+		dropWriteOnHighContention: true,
 	}
 }
