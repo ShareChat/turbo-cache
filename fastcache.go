@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const setBufSize = 2 * 1024
+const setBufSize = 1 * 1024
 const defaultMaxWriteSizeBatch = 250
 const defaultFlushIntervalMillis = 5
 
