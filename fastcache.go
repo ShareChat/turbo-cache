@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const setBufSize = 4 * 1024
+const setBufSize = 2 * 1024
 const defaultMaxWriteSizeBatch = 250
 const defaultFlushIntervalMillis = 5
 
@@ -59,7 +59,8 @@ type Stats struct {
 
 	// MaxBytesSize is the maximum allowed size of the cache in bytes (aka capacity).
 	MaxBytesSize uint64
-
+	// DropWrites due to buffer overflow
+	DropWrites uint64
 	// BigStats contains stats for GetBig/SetBig methods.
 	BigStats
 }
@@ -91,6 +92,9 @@ type BigStats struct {
 	// InvalidValueHashErrors is the number of calls to GetBig resulting
 	// to a chunk with invalid hash value.
 	InvalidValueHashErrors uint64
+
+	// DropWrites due to buffer overflow
+	DropWrites uint64
 }
 
 func (bs *BigStats) reset() {
@@ -100,6 +104,7 @@ func (bs *BigStats) reset() {
 	atomic.StoreUint64(&bs.InvalidMetavalueErrors, 0)
 	atomic.StoreUint64(&bs.InvalidValueLenErrors, 0)
 	atomic.StoreUint64(&bs.InvalidValueHashErrors, 0)
+	atomic.StoreUint64(&bs.DropWrites, 0)
 }
 
 func (b *bucket) stopAsyncWriting() {
@@ -246,6 +251,7 @@ func (c *Cache) UpdateStats(s *Stats) {
 	s.InvalidMetavalueErrors += atomic.LoadUint64(&c.bigStats.InvalidMetavalueErrors)
 	s.InvalidValueLenErrors += atomic.LoadUint64(&c.bigStats.InvalidValueLenErrors)
 	s.InvalidValueHashErrors += atomic.LoadUint64(&c.bigStats.InvalidValueHashErrors)
+	s.DropWrites += atomic.LoadUint64(&c.bigStats.DropWrites)
 }
 
 type bucket struct {
@@ -273,6 +279,7 @@ type bucket struct {
 	collisions      uint64
 	corruptions     uint64
 	writeBufferSize uint64
+	droppedWrites   uint64
 }
 
 func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWrite bool) {
@@ -367,6 +374,7 @@ func (b *bucket) UpdateStats(s *Stats) {
 	s.Misses += atomic.LoadUint64(&b.misses)
 	s.Collisions += atomic.LoadUint64(&b.collisions)
 	s.Corruptions += atomic.LoadUint64(&b.corruptions)
+	s.DropWrites += atomic.LoadUint64(&b.droppedWrites)
 
 	b.mu.RLock()
 	s.EntriesCount += uint64(len(b.m))
@@ -442,6 +450,7 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 		b.setWithLock(k, v, h)
 	} else {
 		if b.dropWriting && len(b.setBuf) >= setBufSize {
+			atomic.AddUint64(&b.droppedWrites, 1)
 			return
 		}
 		b.setBuf <- &insertValue{
