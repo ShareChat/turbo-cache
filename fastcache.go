@@ -61,8 +61,12 @@ type Stats struct {
 	MaxBytesSize uint64
 	// DropWrites due to buffer overflow
 	DropWrites uint64
+	//queue write
+	QueueWrite uint64
 	// BigStats contains stats for GetBig/SetBig methods.
 	BigStats
+	// BigStats contains stats for GetBig/SetBig methods.
+
 }
 
 // Reset resets s, so it may be re-used again in Cache.UpdateStats.
@@ -242,6 +246,7 @@ func (c *Cache) Close() {
 //
 // Call s.Reset before calling UpdateStats if s is re-used.
 func (c *Cache) UpdateStats(s *Stats) {
+	s.QueueWrite = 0
 	for i := range c.buckets[:] {
 		c.buckets[i].UpdateStats(s)
 	}
@@ -375,6 +380,7 @@ func (b *bucket) UpdateStats(s *Stats) {
 	s.Collisions += atomic.LoadUint64(&b.collisions)
 	s.Corruptions += atomic.LoadUint64(&b.corruptions)
 	s.DropWrites += atomic.LoadUint64(&b.droppedWrites)
+	s.QueueWrite += atomic.LoadUint64(&b.writeBufferSize) + uint64(len(b.setBuf))
 
 	b.mu.RLock()
 	s.EntriesCount += uint64(len(b.m))
