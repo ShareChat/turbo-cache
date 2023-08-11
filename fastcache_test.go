@@ -373,5 +373,5 @@ func (c *Cache) getBigWithExpectedValue(dst, k []byte, expected []byte) []byte {
 }
 
 func newCacheConfigWithDefaultParams(maxBytes int) *Config {
-	return NewConfig(maxBytes, defaultFlushInterval, defaultBatchWriteSize)
+	return NewConfig(maxBytes, defaultFlushInterval, defaultBatchWriteSize, 0)
 }

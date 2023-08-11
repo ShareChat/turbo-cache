@@ -62,11 +62,10 @@ type Stats struct {
 	// DropWrites due to buffer overflow
 	DropWrites uint64
 	//queue write
-	QueueWrite uint64
+	QueueWrite  uint64
+	OnFlightSet uint64
 	// BigStats contains stats for GetBig/SetBig methods.
 	BigStats
-	// BigStats contains stats for GetBig/SetBig methods.
-
 }
 
 // Reset resets s, so it may be re-used again in Cache.UpdateStats.
@@ -131,6 +130,8 @@ type Cache struct {
 	bigStats BigStats
 
 	syncWrite bool
+
+	writeLimiter *limiter
 }
 
 // New returns new cache with the given maxBytes capacity in bytes.
@@ -152,9 +153,12 @@ func New(config *Config) *Cache {
 
 	var c Cache
 	c.syncWrite = config.syncWrite
+	if config.concurrentWriteLimit > 0 {
+		c.writeLimiter = newLimiter(int32(config.concurrentWriteLimit))
+	}
 	maxBucketBytes := uint64((config.maxBytes + bucketsCount - 1) / bucketsCount)
 	for i := range c.buckets[:] {
-		c.buckets[i].Init(maxBucketBytes, config.flushIntervalMillis, config.maxWriteBatch, config.syncWrite)
+		c.buckets[i].Init(maxBucketBytes, config.flushIntervalMillis, config.maxWriteBatch, config.syncWrite, c.writeLimiter)
 		c.buckets[i].dropWriting = config.dropWriteOnHighContention
 	}
 	return &c
@@ -257,6 +261,9 @@ func (c *Cache) UpdateStats(s *Stats) {
 	s.InvalidValueLenErrors += atomic.LoadUint64(&c.bigStats.InvalidValueLenErrors)
 	s.InvalidValueHashErrors += atomic.LoadUint64(&c.bigStats.InvalidValueHashErrors)
 	s.DropWrites += atomic.LoadUint64(&c.bigStats.DropWrites)
+	if c.writeLimiter != nil {
+		s.OnFlightSet += uint64(atomic.LoadInt32(&c.writeLimiter.onFlight))
+	}
 }
 
 type bucket struct {
@@ -286,9 +293,10 @@ type bucket struct {
 	writeBufferSize uint64
 	batchSetCalls   uint64
 	droppedWrites   uint64
+	limiter         *limiter
 }
 
-func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWrite bool) {
+func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWrite bool, writeLimiter *limiter) {
 	if maxBytes == 0 {
 		panic(fmt.Errorf("maxBytes cannot be zero"))
 	}
@@ -299,6 +307,7 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 	b.chunks = make([][]byte, maxChunks)
 	b.m = make(map[uint64]uint64)
 	b.Reset()
+	b.limiter = writeLimiter
 	if !syncWrite {
 		b.startProcessingWriteQueue(flushInterval, maxBatch)
 	}
@@ -468,23 +477,33 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 }
 
 func (b *bucket) setWithLock(k, v []byte, h uint64) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.set(k, v, h)
+	if !b.limiter.Do(func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		b.set(k, v, h)
+	}, 1) {
+		atomic.AddUint64(&b.droppedWrites, 1)
+	}
 }
 
 func (b *bucket) setBatch(keys map[string][]byte) {
-	atomic.AddUint64(&b.batchSetCalls, 1)
-	hashes := make(map[string]uint64, len(keys))
-	for k, _ := range keys {
-		hashes[k] = xxhash.Sum64([]byte(k))
+	keyCount := int32(len(keys))
+	if !b.limiter.Do(func() {
+		atomic.AddUint64(&b.batchSetCalls, 1)
+		hashes := make(map[string]uint64, len(keys))
+		for k, _ := range keys {
+			hashes[k] = xxhash.Sum64([]byte(k))
+		}
+		b.mu.Lock()
+		for k, bytes := range keys {
+			kArray := []byte(k)
+			b.set(kArray, bytes, hashes[k])
+		}
+		b.mu.Unlock()
+	}, keyCount) {
+		atomic.AddUint64(&b.droppedWrites, uint64(keyCount))
 	}
-	b.mu.Lock()
-	for k, bytes := range keys {
-		kArray := []byte(k)
-		b.set(kArray, bytes, hashes[k])
-	}
-	b.mu.Unlock()
+
 }
 
 func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
@@ -551,6 +570,7 @@ type Config struct {
 	maxWriteBatch             int
 	syncWrite                 bool
 	dropWriteOnHighContention bool
+	concurrentWriteLimit      int
 }
 
 func NewSyncWriteConfig(maxBytes int) *Config {
@@ -560,11 +580,12 @@ func NewSyncWriteConfig(maxBytes int) *Config {
 	}
 }
 
-func NewConfig(maxBytes int, flushInterval int64, maxWriteBatch int) *Config {
+func NewConfig(maxBytes int, flushInterval int64, maxWriteBatch int, writeConcurrentLimit int) *Config {
 	return &Config{
-		maxBytes:            maxBytes,
-		flushIntervalMillis: flushInterval,
-		maxWriteBatch:       maxWriteBatch,
+		maxBytes:             maxBytes,
+		flushIntervalMillis:  flushInterval,
+		maxWriteBatch:        maxWriteBatch,
+		concurrentWriteLimit: writeConcurrentLimit,
 	}
 }
 
