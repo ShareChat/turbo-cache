@@ -2,14 +2,15 @@
 ## explicit
 github.com/allegro/bigcache
 github.com/allegro/bigcache/queue
+# github.com/alphadose/zenq/v2 v2.8.2
+## explicit; go 1.19
+github.com/alphadose/zenq/v2
+github.com/alphadose/zenq/v2/constants
 # github.com/cespare/xxhash/v2 v2.2.0
 ## explicit; go 1.11
 github.com/cespare/xxhash/v2
 # github.com/davecgh/go-spew v1.1.1
 ## explicit
-# github.com/golang/snappy v0.0.4
-## explicit
-github.com/golang/snappy
 # github.com/stretchr/testify v1.3.0
 ## explicit
 # golang.org/x/sys v0.5.0

@@ -5,6 +5,7 @@ package turbocache
 
 import (
 	"fmt"
+	"github.com/alphadose/zenq/v2"
 	xxhash "github.com/cespare/xxhash/v2"
 	"sync"
 	"sync/atomic"
@@ -266,9 +267,10 @@ type bucket struct {
 	// It consists of 64KB chunks.
 	chunks [][]byte
 
-	setBuf      chan *insertValue
-	stopWriting chan *struct{}
-	dropWriting bool
+	setBuf         chan *insertValue
+	setBufLockFree *zenq.ZenQ[*insertValue]
+	stopWriting    chan *struct{}
+	dropWriting    bool
 	// m maps hash(k) to idx of (k, v) pair in chunks.
 	m map[uint64]uint64
 
@@ -306,39 +308,42 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 
 func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 	b.setBuf = make(chan *insertValue, setBufSize)
+	b.setBufLockFree = zenq.New[*insertValue](setBufSize)
 	b.stopWriting = make(chan *struct{})
 	const initSize = 128
-	go func() {
-		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
+	var firstTimeTimestamp int64
 
-		var firstTimeTimestamp int64
+	go func() {
+
 		buffer := make(map[string][]byte, initSize)
 		for {
-			select {
-			case i := <-b.setBuf:
-				atomic.AddUint64(&b.writeBufferSize, 1)
-				if firstTimeTimestamp == 0 {
-					firstTimeTimestamp = time.Now().UnixMilli()
-				}
+			i, _ := b.setBufLockFree.Read()
+			atomic.AddUint64(&b.writeBufferSize, 1)
+			atomic.CompareAndSwapInt64(&firstTimeTimestamp, 0, time.Now().UnixMilli())
+			if i != nil {
 				buffer[string(i.K[:])] = i.V
+			}
 
-				if len(buffer) >= maxBatch || time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval {
-					b.setBatch(buffer)
-					atomic.StoreUint64(&b.writeBufferSize, 0)
-					firstTimeTimestamp = 0
-					buffer = make(map[string][]byte, initSize)
-				}
-			case _ = <-t:
-				if firstTimeTimestamp != 0 && (len(buffer) >= maxBatch || time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval) {
-					b.setBatch(buffer)
-					atomic.StoreUint64(&b.writeBufferSize, 0)
-					firstTimeTimestamp = 0
-					buffer = make(map[string][]byte, initSize)
-				}
-			case <-b.stopWriting:
-				return
+			if len(buffer) >= maxBatch || (time.Since(time.UnixMilli(atomic.LoadInt64(&firstTimeTimestamp))).Milliseconds() >= flushInterval && len(buffer) > 0) {
+				b.setBatch(buffer)
+				atomic.StoreUint64(&b.writeBufferSize, 0)
+				atomic.StoreInt64(&firstTimeTimestamp, 0)
+				buffer = make(map[string][]byte, initSize)
 			}
 		}
+		/*select {
+		case i := <-b.setBuf:
+
+		case _ = <-t:
+			if firstTimeTimestamp != 0 && (len(buffer) >= maxBatch || time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval) {
+				b.setBatch(buffer)
+				atomic.StoreUint64(&b.writeBufferSize, 0)
+				firstTimeTimestamp = 0
+				buffer = make(map[string][]byte, initSize)
+			}
+		case <-b.stopWriting:
+			return
+		}*/
 	}()
 }
 
@@ -456,14 +461,15 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 	if sync {
 		b.setWithLock(k, v, h)
 	} else {
+		//b.setBufLockFree
 		if b.dropWriting && len(b.setBuf) >= setBufSize {
 			atomic.AddUint64(&b.droppedWrites, 1)
 			return
 		}
-		b.setBuf <- &insertValue{
+		b.setBufLockFree.Write(&insertValue{
 			K: k,
 			V: v,
-		}
+		})
 	}
 }
 
