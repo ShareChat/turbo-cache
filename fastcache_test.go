@@ -230,6 +230,22 @@ func testCacheGetSet(c *Cache, itemsCount int) error {
 	return nil
 }
 
+func TestShouldDropWritingOnBufferOverflow(t *testing.T) {
+	itemsCount := 512 * setBufSize * 2
+	const gorotines = 10
+	c := New(NewConfigWithDroppingOnContention(30*itemsCount*gorotines, 5, 100))
+	c.Close()
+
+	for i := 0; i < itemsCount; i++ {
+		c.Set([]byte(fmt.Sprintf("key %d", i)), []byte(fmt.Sprintf("value %d", i)))
+	}
+	var s Stats
+	c.UpdateStats(&s)
+	if s.DropWrites == 0 {
+		t.Fatalf("drop writes should be presented")
+	}
+}
+
 func TestCacheResetUpdateStatsSetConcurrent(t *testing.T) {
 	c := New(newCacheConfigWithDefaultParams(12334))
 
