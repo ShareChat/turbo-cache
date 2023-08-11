@@ -475,10 +475,14 @@ func (b *bucket) setWithLock(k, v []byte, h uint64) {
 
 func (b *bucket) setBatch(keys map[string][]byte) {
 	atomic.AddUint64(&b.batchSetCalls, 1)
+	hashes := make(map[string]uint64, len(keys))
+	for k, _ := range keys {
+		hashes[k] = xxhash.Sum64([]byte(k))
+	}
 	b.mu.Lock()
 	for k, bytes := range keys {
 		kArray := []byte(k)
-		b.set(kArray, bytes, xxhash.Sum64(kArray))
+		b.set(kArray, bytes, hashes[k])
 	}
 	b.mu.Unlock()
 }
@@ -496,15 +500,12 @@ func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
 		if gen == bGen && idx < b.idx || gen+1 == bGen && idx >= b.idx || gen == maxGen && bGen == 1 && idx >= b.idx {
 			chunkIdx := idx / chunkSize
 			if chunkIdx >= uint64(len(chunks)) {
-				// Corrupted data during the load from file. Just skip it.
-				atomic.AddUint64(&b.corruptions, 1)
 				goto end
 			}
 			chunk := chunks[chunkIdx]
 			idx %= chunkSize
 			if idx+4 >= chunkSize {
-				// Corrupted data during the load from file. Just skip it.
-				atomic.AddUint64(&b.corruptions, 1)
+				//removed stats for corruption
 				goto end
 			}
 			kvLenBuf := chunk[idx : idx+4]
@@ -512,8 +513,7 @@ func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
 			valLen := (uint64(kvLenBuf[2]) << 8) | uint64(kvLenBuf[3])
 			idx += 4
 			if idx+keyLen+valLen >= chunkSize {
-				// Corrupted data during the load from file. Just skip it.
-				atomic.AddUint64(&b.corruptions, 1)
+				//removed stats for corruption
 				goto end
 			}
 			if string(k) == string(chunk[idx:idx+keyLen]) {
@@ -523,7 +523,7 @@ func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
 				}
 				found = true
 			} else {
-				atomic.AddUint64(&b.collisions, 1)
+				//removed stats for collision
 			}
 		}
 	}
