@@ -307,7 +307,7 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 	b.setBuf = make(chan *insertValue, setBufSize)
 	b.stopWriting = make(chan *struct{})
-	const initSize = 64
+	const initSize = 128
 	go func() {
 		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
 
