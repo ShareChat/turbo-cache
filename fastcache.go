@@ -6,6 +6,7 @@ package turbocache
 import (
 	"fmt"
 	xxhash "github.com/cespare/xxhash/v2"
+	"github.com/prgsmall/ringmap"
 	"math/rand"
 	"runtime"
 	"sync"
@@ -202,7 +203,7 @@ func (c *Cache) setSync(k, v []byte) {
 func (c *Cache) Get(dst, k []byte) []byte {
 	h := xxhash.Sum64(k)
 	idx := h % bucketsCount
-	dst, _ = c.buckets[idx].Get(dst, k, h, true, true)
+	dst, _ = c.buckets[idx].Get(dst, k, h, true)
 	return dst
 }
 
@@ -212,14 +213,14 @@ func (c *Cache) Get(dst, k []byte) []byte {
 func (c *Cache) HasGet(dst, k []byte) ([]byte, bool) {
 	h := xxhash.Sum64(k)
 	idx := h % bucketsCount
-	return c.buckets[idx].Get(dst, k, h, true, true)
+	return c.buckets[idx].Get(dst, k, h, true)
 }
 
 // Has returns true if entry for the given key k exists in the cache.
 func (c *Cache) Has(k []byte) bool {
 	h := xxhash.Sum64(k)
 	idx := h % bucketsCount
-	_, ok := c.buckets[idx].Get(nil, k, h, false, true)
+	_, ok := c.buckets[idx].Get(nil, k, h, false)
 	return ok
 }
 
@@ -277,6 +278,7 @@ type bucket struct {
 	chunks [][]byte
 
 	setBuf      chan *insertValue
+	dedupBuffer *ringmap.RingMap
 	stopWriting chan *struct{}
 	dropWriting bool
 	// m maps hash(k) to idx of (k, v) pair in chunks.
@@ -318,18 +320,20 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 
 func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 	b.setBuf = make(chan *insertValue, setBufSize)
+	b.dedupBuffer = ringmap.NewRingMap(setBufSize)
 	b.stopWriting = make(chan *struct{})
 	const initSize = 128
 	go func() {
 		t := time.Tick(makeFlushInterval(flushInterval))
 
 		var firstTimeTimestamp int64
-		buffer := make(map[string][]byte, initSize)
+		buffer := make(map[string]*bufferValue, initSize)
 		for {
 			select {
 			case i := <-b.setBuf:
-				if _, ok := b.Get(nil, i.K, i.h, false, false); !ok {
-					buffer[string(i.K[:])] = i.V
+				keyStr := string(i.K[:])
+				if v, ok := b.dedupBuffer.Get(keyStr); !ok || i.timeStamp > v.(int64) {
+					buffer[keyStr] = &bufferValue{V: i.V, h: i.h}
 					atomic.AddUint64(&b.writeBufferSize, 1)
 					if firstTimeTimestamp == 0 {
 						firstTimeTimestamp = time.Now().UnixMilli()
@@ -340,14 +344,14 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 					b.setBatch(buffer)
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					firstTimeTimestamp = 0
-					buffer = make(map[string][]byte, initSize)
+					buffer = make(map[string]*bufferValue, initSize)
 				}
 			case _ = <-t:
 				if len(buffer) > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval {
 					b.setBatch(buffer)
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					firstTimeTimestamp = 0
-					buffer = make(map[string][]byte, initSize)
+					buffer = make(map[string]*bufferValue, initSize)
 				}
 			case <-b.stopWriting:
 				return
@@ -482,9 +486,10 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 			return
 		}
 		b.setBuf <- &insertValue{
-			K: k,
-			V: v,
-			h: h,
+			K:         k,
+			V:         v,
+			h:         h,
+			timeStamp: time.Now().UnixMilli(),
 		}
 	}
 }
@@ -495,25 +500,21 @@ func (b *bucket) setWithLock(k, v []byte, h uint64) {
 	b.set(k, v, h)
 }
 
-func (b *bucket) setBatch(keys map[string][]byte) {
+func (b *bucket) setBatch(keys map[string]*bufferValue) {
 	atomic.AddUint64(&b.batchSetCalls, 1)
-	hashes := make(map[string]uint64, len(keys))
-	for k, _ := range keys {
-		hashes[k] = xxhash.Sum64([]byte(k))
-	}
 	b.mu.Lock()
-	for k, bytes := range keys {
-		kArray := []byte(k)
-		b.set(kArray, bytes, hashes[k])
+	for k, v := range keys {
+		b.set([]byte(k), v.V, v.h)
 	}
 	b.mu.Unlock()
+	for k, _ := range keys {
+		b.dedupBuffer.Set(k, time.Now().UnixMilli())
+	}
 	runtime.Gosched()
 }
 
-func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool, collectMetrics bool) ([]byte, bool) {
-	if collectMetrics {
-		atomic.AddUint64(&b.getCalls, 1)
-	}
+func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
+	atomic.AddUint64(&b.getCalls, 1)
 
 	found := false
 	chunks := b.chunks
@@ -555,7 +556,7 @@ func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool, collectMetrics boo
 	}
 end:
 	b.mu.RUnlock()
-	if !found && collectMetrics {
+	if !found {
 		atomic.AddUint64(&b.misses, 1)
 	}
 	return dst, found
@@ -568,8 +569,13 @@ func (b *bucket) Del(h uint64) {
 }
 
 type insertValue struct {
-	K, V []byte
-	h    uint64
+	K, V      []byte
+	h         uint64
+	timeStamp int64
+}
+type bufferValue struct {
+	V []byte
+	h uint64
 }
 
 type Config struct {
