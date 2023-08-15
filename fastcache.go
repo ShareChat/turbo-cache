@@ -13,11 +13,11 @@ import (
 	"time"
 )
 
-const setBufSize = 4 * 1024
+const setBufSize = 1 * 1024
 const defaultMaxWriteSizeBatch = 250
 const defaultFlushIntervalMillis = 5
 
-const bucketsCount = 2048
+const bucketsCount = 8192
 
 const chunkSize = 64 * 1024
 
@@ -315,11 +315,12 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 	b.setBuf = make(chan *insertValue, setBufSize)
 	b.stopWriting = make(chan *struct{})
+	const initSize = 128
 	go func() {
 		b.randomDelay(flushInterval)
 		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
 		var firstTimeTimestamp int64
-		buffer := make(map[string][]byte, maxBatch)
+		buffer := make(map[string][]byte, initSize)
 		for {
 			select {
 			case i := <-b.setBuf:
@@ -334,14 +335,14 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 					b.setBatch(buffer)
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					firstTimeTimestamp = 0
-					buffer = make(map[string][]byte, maxBatch)
+					buffer = make(map[string][]byte, initSize)
 				}
 			case _ = <-t:
 				if len(buffer) > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval {
 					b.setBatch(buffer)
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					firstTimeTimestamp = 0
-					buffer = make(map[string][]byte, maxBatch)
+					buffer = make(map[string][]byte, initSize)
 				}
 			case <-b.stopWriting:
 				return
@@ -501,7 +502,7 @@ func (b *bucket) setBatch(keys map[string][]byte) {
 	for k, _ := range keys {
 		hashes[k] = xxhash.Sum64([]byte(k))
 	}
-	if !b.limiter.Acquire(int32(len(keys))) {
+	if !b.limiter.Acquire(1) {
 		atomic.AddUint64(&b.droppedWrites, uint64(len(keys)))
 		return
 	}
@@ -511,7 +512,7 @@ func (b *bucket) setBatch(keys map[string][]byte) {
 		b.set(keyBytes, v, hashes[k])
 	}
 	b.mu.Unlock()
-	b.limiter.Release(int32(len(keys)))
+	b.limiter.Release(1)
 
 	runtime.Gosched()
 }
