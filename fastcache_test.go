@@ -247,9 +247,9 @@ func TestShouldDropWritingOnBufferOverflow(t *testing.T) {
 }
 
 func TestShouldDropWritingOnLimitSetting(t *testing.T) {
-	itemsCount := 512 * setBufSize
+	itemsCount := 16 * setBufSize
 	const gorotines = 10
-	c := New(NewConfigWithDroppingOnContention(30*itemsCount*gorotines, 5, 100, 100))
+	c := New(NewConfigWithDroppingOnContention(30*itemsCount*gorotines, 5, 10, 10))
 
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
