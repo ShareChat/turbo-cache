@@ -11,21 +11,22 @@ func newLimiter(limit int32) *limiter {
 	return &limiter{limit: limit, onFlight: 0}
 }
 
-func (l *limiter) Do(limitingAction func(), number int32) bool {
-	if l == nil {
-		limitingAction()
+func (l *limiter) Acquire(count int32) bool {
+	if l.limit <= 0 {
 		return true
 	}
-
-	return l.do(limitingAction, number)
+	if atomic.LoadInt32(&l.onFlight)+count > l.limit {
+		return false
+	}
+	var result = atomic.AddInt32(&l.onFlight, count) <= l.limit
+	if !result {
+		atomic.AddInt32(&l.onFlight, -1*count)
+	}
+	return result
 }
 
-func (l *limiter) do(limitingAction func(), number int32) bool {
-	defer atomic.AddInt32(&l.onFlight, -1*number)
-	if atomic.AddInt32(&l.onFlight, number) < l.limit {
-		limitingAction()
-		return true
-	} else {
-		return false
+func (l *limiter) Release(count int32) {
+	if l.limit > 0 {
+		atomic.AddInt32(&l.onFlight, -1*count)
 	}
 }

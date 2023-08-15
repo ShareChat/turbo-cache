@@ -38,8 +38,9 @@ type Stats struct {
 	GetCalls uint64
 
 	// SetCalls is the number of Set calls.
-	SetCalls uint64
-
+	SetCalls        uint64
+	SetBatchCalls   uint64
+	DuplicatedCount uint64
 	// Misses is the number of cache misses.
 	Misses uint64
 
@@ -62,12 +63,14 @@ type Stats struct {
 
 	// MaxBytesSize is the maximum allowed size of the cache in bytes (aka capacity).
 	MaxBytesSize uint64
-	// DropWrites due to buffer overflow
-	DropWrites uint64
+	// drops due to buffer overflow
+	DropsInQueue uint64
+	// Drops due to write limit
+	DroppedWrites uint64
 	//queue write
-	QueueWrite  uint64
-	OnFlightSet uint64
-	SetBatch    uint64
+	WriteQueueSize   uint64
+	OnFlightSetCalls uint64
+
 	// BigStats contains stats for GetBig/SetBig methods.
 	BigStats
 }
@@ -99,9 +102,6 @@ type BigStats struct {
 	// InvalidValueHashErrors is the number of calls to GetBig resulting
 	// to a chunk with invalid hash value.
 	InvalidValueHashErrors uint64
-
-	// DropWrites due to buffer overflow
-	DropWrites uint64
 }
 
 func (bs *BigStats) reset() {
@@ -111,7 +111,6 @@ func (bs *BigStats) reset() {
 	atomic.StoreUint64(&bs.InvalidMetavalueErrors, 0)
 	atomic.StoreUint64(&bs.InvalidValueLenErrors, 0)
 	atomic.StoreUint64(&bs.InvalidValueHashErrors, 0)
-	atomic.StoreUint64(&bs.DropWrites, 0)
 }
 
 func (b *bucket) stopAsyncWriting() {
@@ -157,9 +156,7 @@ func New(config *Config) *Cache {
 
 	var c Cache
 	c.syncWrite = config.syncWrite
-	if config.concurrentWriteLimit > 0 {
-		c.writeLimiter = newLimiter(int32(config.concurrentWriteLimit))
-	}
+	c.writeLimiter = newLimiter(int32(config.concurrentWriteLimit))
 	maxBucketBytes := uint64((config.maxBytes + bucketsCount - 1) / bucketsCount)
 	for i := range c.buckets[:] {
 		c.buckets[i].Init(maxBucketBytes, config.flushIntervalMillis, config.maxWriteBatch, config.syncWrite, c.writeLimiter)
@@ -254,7 +251,7 @@ func (c *Cache) Close() {
 //
 // Call s.Reset before calling UpdateStats if s is re-used.
 func (c *Cache) UpdateStats(s *Stats) {
-	s.QueueWrite = 0
+	s.WriteQueueSize = 0
 	for i := range c.buckets[:] {
 		c.buckets[i].UpdateStats(s)
 	}
@@ -264,10 +261,7 @@ func (c *Cache) UpdateStats(s *Stats) {
 	s.InvalidMetavalueErrors += atomic.LoadUint64(&c.bigStats.InvalidMetavalueErrors)
 	s.InvalidValueLenErrors += atomic.LoadUint64(&c.bigStats.InvalidValueLenErrors)
 	s.InvalidValueHashErrors += atomic.LoadUint64(&c.bigStats.InvalidValueHashErrors)
-	s.DropWrites += atomic.LoadUint64(&c.bigStats.DropWrites)
-	if c.writeLimiter != nil {
-		s.OnFlightSet += uint64(atomic.LoadInt32(&c.writeLimiter.onFlight))
-	}
+	s.OnFlightSetCalls = uint64(atomic.LoadInt32(&c.writeLimiter.onFlight))
 }
 
 type bucket struct {
@@ -292,12 +286,14 @@ type bucket struct {
 
 	getCalls        uint64
 	setCalls        uint64
+	batchSetCalls   uint64
 	misses          uint64
 	collisions      uint64
 	corruptions     uint64
 	writeBufferSize uint64
-	batchSetCalls   uint64
+	dropsInQueue    uint64
 	droppedWrites   uint64
+	duplicatedCount uint64
 	limiter         *limiter
 }
 
@@ -324,8 +320,8 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 	b.stopWriting = make(chan *struct{})
 	const initSize = 128
 	go func() {
-		t := time.Tick(makeFlushInterval(flushInterval))
-
+		b.randomDelay(flushInterval)
+		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
 		var firstTimeTimestamp int64
 		buffer := make(map[string]*bufferValue, initSize)
 		for {
@@ -334,10 +330,13 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 				keyStr := string(i.K[:])
 				if v, ok := b.dedupBuffer.Get(keyStr); !ok || i.timeStamp > v.(int64) {
 					buffer[keyStr] = &bufferValue{V: i.V, h: i.h}
+					b.dedupBuffer.Set(keyStr, time.Now().UnixMilli())
 					atomic.AddUint64(&b.writeBufferSize, 1)
 					if firstTimeTimestamp == 0 {
 						firstTimeTimestamp = time.Now().UnixMilli()
 					}
+				} else {
+					atomic.AddUint64(&b.duplicatedCount, 1)
 				}
 
 				if len(buffer) >= maxBatch || (len(buffer) > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval) {
@@ -360,9 +359,14 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 	}()
 }
 
+func (b *bucket) randomDelay(maxDelayMillis int64) {
+	jitterDelay := rand.Int63() % (maxDelayMillis * 1000)
+	time.Sleep(time.Duration(jitterDelay) * time.Microsecond)
+}
+
 func makeFlushInterval(flushInterval int64) time.Duration {
-	jitter := rand.Int63() % 2000
-	duration := time.Duration(flushInterval)*time.Millisecond + time.Duration(jitter)*time.Microsecond
+	jitter := rand.Int63() % flushInterval
+	duration := time.Duration(flushInterval+jitter) * time.Millisecond
 	return duration
 }
 
@@ -404,9 +408,11 @@ func (b *bucket) UpdateStats(s *Stats) {
 	s.Misses += atomic.LoadUint64(&b.misses)
 	s.Collisions += atomic.LoadUint64(&b.collisions)
 	s.Corruptions += atomic.LoadUint64(&b.corruptions)
-	s.DropWrites += atomic.LoadUint64(&b.droppedWrites)
-	s.QueueWrite += atomic.LoadUint64(&b.writeBufferSize) + uint64(len(b.setBuf))
-	s.SetBatch += atomic.LoadUint64(&b.batchSetCalls)
+	s.DropsInQueue += atomic.LoadUint64(&b.dropsInQueue)
+	s.DroppedWrites += atomic.LoadUint64(&b.droppedWrites)
+	s.WriteQueueSize += atomic.LoadUint64(&b.writeBufferSize) + uint64(len(b.setBuf))
+	s.SetBatchCalls += atomic.LoadUint64(&b.batchSetCalls)
+	s.DuplicatedCount += atomic.LoadUint64(&b.duplicatedCount)
 
 	b.mu.RLock()
 	s.EntriesCount += uint64(len(b.m))
@@ -482,7 +488,7 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 		b.setWithLock(k, v, h)
 	} else {
 		if b.dropWriting && len(b.setBuf) >= setBufSize {
-			atomic.AddUint64(&b.droppedWrites, 1)
+			atomic.AddUint64(&b.dropsInQueue, 1)
 			return
 		}
 		b.setBuf <- &insertValue{
@@ -495,22 +501,29 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 }
 
 func (b *bucket) setWithLock(k, v []byte, h uint64) {
+	if b.limiter.Acquire(1) {
+		defer b.limiter.Release(1)
+	} else {
+		atomic.AddUint64(&b.droppedWrites, 1)
+		return
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.set(k, v, h)
 }
 
 func (b *bucket) setBatch(keys map[string]*bufferValue) {
+	if !b.limiter.Acquire(int32(len(keys))) {
+		atomic.AddUint64(&b.droppedWrites, uint64(len(keys)))
+		return
+	}
 	atomic.AddUint64(&b.batchSetCalls, 1)
 	b.mu.Lock()
 	for k, v := range keys {
 		b.set([]byte(k), v.V, v.h)
 	}
 	b.mu.Unlock()
-	now := time.Now().UnixMilli()
-	for k, _ := range keys {
-		b.dedupBuffer.Set(k, now)
-	}
+	b.limiter.Release(int32(len(keys)))
 	runtime.Gosched()
 }
 
@@ -595,20 +608,20 @@ func NewSyncWriteConfig(maxBytes int) *Config {
 	}
 }
 
-func NewConfig(maxBytes int, flushInterval int64, maxWriteBatch int, writeConcurrentLimit int) *Config {
+func NewConfig(maxBytes int, flushInterval int64, maxWriteBatch int) *Config {
 	return &Config{
-		maxBytes:             maxBytes,
-		flushIntervalMillis:  flushInterval,
-		maxWriteBatch:        maxWriteBatch,
-		concurrentWriteLimit: writeConcurrentLimit,
+		maxBytes:            maxBytes,
+		flushIntervalMillis: flushInterval,
+		maxWriteBatch:       maxWriteBatch,
 	}
 }
 
-func NewConfigWithDroppingOnContention(maxBytes int, flushInterval int64, maxWriteBatch int) *Config {
+func NewConfigWithDroppingOnContention(maxBytes int, flushInterval int64, maxWriteBatch int, writeConcurrentLimit int) *Config {
 	return &Config{
 		maxBytes:                  maxBytes,
 		flushIntervalMillis:       flushInterval,
 		maxWriteBatch:             maxWriteBatch,
 		dropWriteOnHighContention: true,
+		concurrentWriteLimit:      writeConcurrentLimit,
 	}
 }

@@ -231,9 +231,9 @@ func testCacheGetSet(c *Cache, itemsCount int) error {
 }
 
 func TestShouldDropWritingOnBufferOverflow(t *testing.T) {
-	itemsCount := 512 * setBufSize * 2
+	itemsCount := 512 * setBufSize * 4
 	const gorotines = 10
-	c := New(NewConfigWithDroppingOnContention(30*itemsCount*gorotines, 5, 100))
+	c := New(NewConfigWithDroppingOnContention(30*itemsCount*gorotines, 5, 100, 1000))
 	c.Close()
 
 	for i := 0; i < itemsCount; i++ {
@@ -241,7 +241,31 @@ func TestShouldDropWritingOnBufferOverflow(t *testing.T) {
 	}
 	var s Stats
 	c.UpdateStats(&s)
-	if s.DropWrites == 0 {
+	if s.DropsInQueue == 0 {
+		t.Fatalf("drop writes should be presented")
+	}
+}
+
+func TestShouldDropWritingOnLimitSetting(t *testing.T) {
+	itemsCount := 512 * setBufSize
+	const gorotines = 10
+	c := New(NewConfigWithDroppingOnContention(30*itemsCount*gorotines, 5, 100, 100))
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		curId := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < itemsCount; i++ {
+				c.Set([]byte(fmt.Sprintf("key %d, gorutine: %d", i, curId)), []byte(fmt.Sprintf("value %d", i)))
+			}
+		}()
+	}
+	wg.Wait()
+	var s Stats
+	c.UpdateStats(&s)
+	if s.DroppedWrites == 0 {
 		t.Fatalf("drop writes should be presented")
 	}
 }
@@ -373,5 +397,5 @@ func (c *Cache) getBigWithExpectedValue(dst, k []byte, expected []byte) []byte {
 }
 
 func newCacheConfigWithDefaultParams(maxBytes int) *Config {
-	return NewConfig(maxBytes, defaultFlushInterval, defaultBatchWriteSize, 0)
+	return NewConfigWithDroppingOnContention(maxBytes, defaultFlushInterval, defaultBatchWriteSize, 100000)
 }
