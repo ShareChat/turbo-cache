@@ -3,30 +3,35 @@ package turbocache
 import "sync/atomic"
 
 type limiter struct {
-	limit    int32
-	onFlight int32
+	limit    atomic.Int32
+	onFlight atomic.Int32
 }
 
 func newLimiter(limit int32) *limiter {
-	return &limiter{limit: limit, onFlight: 0}
+	flight := atomic.Int32{}
+	flight.Store(0)
+	lim := atomic.Int32{}
+	lim.Store(limit)
+	return &limiter{limit: lim, onFlight: flight}
 }
 
 func (l *limiter) Acquire(count int32) bool {
-	if l.limit <= 0 {
+	if l.limit.Load() <= 0 {
 		return true
 	}
-	if atomic.LoadInt32(&l.onFlight)+count > l.limit {
+
+	if l.onFlight.Load()+count > l.limit.Load() {
 		return false
 	}
-	var result = atomic.AddInt32(&l.onFlight, count) <= l.limit
+	var result = l.onFlight.Add(count) <= l.limit.Load()
 	if !result {
-		atomic.AddInt32(&l.onFlight, -1*count)
+		l.onFlight.Add(-1 * count)
 	}
 	return result
 }
 
 func (l *limiter) Release(count int32) {
-	if l.limit > 0 {
-		atomic.AddInt32(&l.onFlight, -1*count)
+	if l.limit.Load() > 0 {
+		l.onFlight.Add(-1 * count)
 	}
 }

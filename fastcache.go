@@ -260,7 +260,7 @@ func (c *Cache) UpdateStats(s *Stats) {
 	s.InvalidMetavalueErrors += atomic.LoadUint64(&c.bigStats.InvalidMetavalueErrors)
 	s.InvalidValueLenErrors += atomic.LoadUint64(&c.bigStats.InvalidValueLenErrors)
 	s.InvalidValueHashErrors += atomic.LoadUint64(&c.bigStats.InvalidValueHashErrors)
-	s.OnFlightSetCalls = uint64(atomic.LoadInt32(&c.writeLimiter.onFlight))
+	s.OnFlightSetCalls = uint64(c.writeLimiter.onFlight.Load())
 }
 
 type bucket struct {
