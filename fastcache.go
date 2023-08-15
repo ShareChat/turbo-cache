@@ -6,6 +6,8 @@ package turbocache
 import (
 	"fmt"
 	xxhash "github.com/cespare/xxhash/v2"
+	"math/rand"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -64,6 +66,7 @@ type Stats struct {
 	//queue write
 	QueueWrite  uint64
 	OnFlightSet uint64
+	SetBatch    uint64
 	// BigStats contains stats for GetBig/SetBig methods.
 	BigStats
 }
@@ -199,7 +202,7 @@ func (c *Cache) setSync(k, v []byte) {
 func (c *Cache) Get(dst, k []byte) []byte {
 	h := xxhash.Sum64(k)
 	idx := h % bucketsCount
-	dst, _ = c.buckets[idx].Get(dst, k, h, true)
+	dst, _ = c.buckets[idx].Get(dst, k, h, true, true)
 	return dst
 }
 
@@ -209,14 +212,14 @@ func (c *Cache) Get(dst, k []byte) []byte {
 func (c *Cache) HasGet(dst, k []byte) ([]byte, bool) {
 	h := xxhash.Sum64(k)
 	idx := h % bucketsCount
-	return c.buckets[idx].Get(dst, k, h, true)
+	return c.buckets[idx].Get(dst, k, h, true, true)
 }
 
 // Has returns true if entry for the given key k exists in the cache.
 func (c *Cache) Has(k []byte) bool {
 	h := xxhash.Sum64(k)
 	idx := h % bucketsCount
-	_, ok := c.buckets[idx].Get(nil, k, h, false)
+	_, ok := c.buckets[idx].Get(nil, k, h, false, true)
 	return ok
 }
 
@@ -318,27 +321,29 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 	b.stopWriting = make(chan *struct{})
 	const initSize = 128
 	go func() {
-		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
+		t := time.Tick(makeFlushInterval(flushInterval))
 
 		var firstTimeTimestamp int64
 		buffer := make(map[string][]byte, initSize)
 		for {
 			select {
 			case i := <-b.setBuf:
-				atomic.AddUint64(&b.writeBufferSize, 1)
-				if firstTimeTimestamp == 0 {
-					firstTimeTimestamp = time.Now().UnixMilli()
+				if _, ok := b.Get(nil, i.K, i.h, false, false); !ok {
+					buffer[string(i.K[:])] = i.V
+					atomic.AddUint64(&b.writeBufferSize, 1)
+					if firstTimeTimestamp == 0 {
+						firstTimeTimestamp = time.Now().UnixMilli()
+					}
 				}
-				buffer[string(i.K[:])] = i.V
 
-				if len(buffer) >= maxBatch || time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval {
+				if len(buffer) >= maxBatch || (len(buffer) > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval) {
 					b.setBatch(buffer)
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					firstTimeTimestamp = 0
 					buffer = make(map[string][]byte, initSize)
 				}
 			case _ = <-t:
-				if firstTimeTimestamp != 0 && (len(buffer) >= maxBatch || time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval) {
+				if len(buffer) > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval {
 					b.setBatch(buffer)
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					firstTimeTimestamp = 0
@@ -351,6 +356,12 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 	}()
 }
 
+func makeFlushInterval(flushInterval int64) time.Duration {
+	jitter := rand.Int63() % 2000
+	duration := time.Duration(flushInterval)*time.Millisecond + time.Duration(jitter)*time.Microsecond
+	return duration
+}
+
 func (b *bucket) Reset() {
 	b.mu.Lock()
 	chunks := b.chunks
@@ -361,12 +372,12 @@ func (b *bucket) Reset() {
 	b.m = make(map[uint64]uint64)
 	b.idx = 0
 	b.gen = 1
+	b.mu.Unlock()
 	atomic.StoreUint64(&b.getCalls, 0)
 	atomic.StoreUint64(&b.setCalls, 0)
 	atomic.StoreUint64(&b.misses, 0)
 	atomic.StoreUint64(&b.collisions, 0)
 	atomic.StoreUint64(&b.corruptions, 0)
-	b.mu.Unlock()
 }
 
 func (b *bucket) cleanLocked() {
@@ -391,6 +402,7 @@ func (b *bucket) UpdateStats(s *Stats) {
 	s.Corruptions += atomic.LoadUint64(&b.corruptions)
 	s.DropWrites += atomic.LoadUint64(&b.droppedWrites)
 	s.QueueWrite += atomic.LoadUint64(&b.writeBufferSize) + uint64(len(b.setBuf))
+	s.SetBatch += atomic.LoadUint64(&b.batchSetCalls)
 
 	b.mu.RLock()
 	s.EntriesCount += uint64(len(b.m))
@@ -398,9 +410,9 @@ func (b *bucket) UpdateStats(s *Stats) {
 	for _, chunk := range b.chunks {
 		bytesSize += uint64(cap(chunk))
 	}
-	s.BytesSize += bytesSize
 	s.MaxBytesSize += uint64(len(b.chunks)) * chunkSize
 	b.mu.RUnlock()
+	s.BytesSize += bytesSize
 }
 
 func (b *bucket) set(k, v []byte, h uint64) {
@@ -472,6 +484,7 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 		b.setBuf <- &insertValue{
 			K: k,
 			V: v,
+			h: h,
 		}
 	}
 }
@@ -500,14 +513,18 @@ func (b *bucket) setBatch(keys map[string][]byte) {
 			b.set(kArray, bytes, hashes[k])
 		}
 		b.mu.Unlock()
+		runtime.Gosched()
 	}, keyCount) {
 		atomic.AddUint64(&b.droppedWrites, uint64(keyCount))
 	}
 
 }
 
-func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
-	atomic.AddUint64(&b.getCalls, 1)
+func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool, collectMetrics bool) ([]byte, bool) {
+	if collectMetrics {
+		atomic.AddUint64(&b.getCalls, 1)
+	}
+
 	found := false
 	chunks := b.chunks
 	b.mu.RLock()
@@ -548,7 +565,7 @@ func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
 	}
 end:
 	b.mu.RUnlock()
-	if !found {
+	if !found && collectMetrics {
 		atomic.AddUint64(&b.misses, 1)
 	}
 	return dst, found
@@ -562,6 +579,7 @@ func (b *bucket) Del(h uint64) {
 
 type insertValue struct {
 	K, V []byte
+	h    uint64
 }
 
 type Config struct {
