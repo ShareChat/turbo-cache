@@ -323,13 +323,13 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 		b.randomDelay(flushInterval)
 		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
 		var firstTimeTimestamp int64
-		buffer := make(map[string]*bufferValue, initSize)
+		buffer := make(map[string][]byte, initSize)
 		for {
 			select {
 			case i := <-b.setBuf:
 				keyStr := string(i.K[:])
 				if v, ok := b.dedupBuffer.Get(keyStr); !ok || i.timeStamp > v.(int64) {
-					buffer[keyStr] = &bufferValue{V: i.V, h: i.h}
+					buffer[keyStr] = i.V
 					b.dedupBuffer.Set(keyStr, time.Now().UnixMilli())
 					atomic.AddUint64(&b.writeBufferSize, 1)
 					if firstTimeTimestamp == 0 {
@@ -343,14 +343,14 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 					b.setBatch(buffer)
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					firstTimeTimestamp = 0
-					buffer = make(map[string]*bufferValue, initSize)
+					buffer = make(map[string][]byte, initSize)
 				}
 			case _ = <-t:
 				if len(buffer) > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval {
 					b.setBatch(buffer)
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					firstTimeTimestamp = 0
-					buffer = make(map[string]*bufferValue, initSize)
+					buffer = make(map[string][]byte, initSize)
 				}
 			case <-b.stopWriting:
 				return
@@ -362,12 +362,6 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 func (b *bucket) randomDelay(maxDelayMillis int64) {
 	jitterDelay := rand.Int63() % (maxDelayMillis * 1000)
 	time.Sleep(time.Duration(jitterDelay) * time.Microsecond)
-}
-
-func makeFlushInterval(flushInterval int64) time.Duration {
-	jitter := rand.Int63() % flushInterval
-	duration := time.Duration(flushInterval+jitter) * time.Millisecond
-	return duration
 }
 
 func (b *bucket) Reset() {
@@ -491,12 +485,16 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 			atomic.AddUint64(&b.dropsInQueue, 1)
 			return
 		}
-		b.setBuf <- &insertValue{
-			K:         k,
-			V:         v,
-			h:         h,
-			timeStamp: time.Now().UnixMilli(),
+		now := time.Now().UnixMilli()
+		if dv, ok := b.dedupBuffer.Get(string(k[:])); !ok || now > dv.(int64) {
+			b.setBuf <- &insertValue{
+				K:         k,
+				V:         v,
+				h:         h,
+				timeStamp: now,
+			}
 		}
+
 	}
 }
 
@@ -512,15 +510,20 @@ func (b *bucket) setWithLock(k, v []byte, h uint64) {
 	b.set(k, v, h)
 }
 
-func (b *bucket) setBatch(keys map[string]*bufferValue) {
+func (b *bucket) setBatch(keys map[string][]byte) {
 	if !b.limiter.Acquire(int32(len(keys))) {
 		atomic.AddUint64(&b.droppedWrites, uint64(len(keys)))
 		return
 	}
 	atomic.AddUint64(&b.batchSetCalls, 1)
+	hashes := make(map[string]uint64, len(keys))
+	for k, _ := range keys {
+		hashes[k] = xxhash.Sum64([]byte(k))
+	}
 	b.mu.Lock()
 	for k, v := range keys {
-		b.set([]byte(k), v.V, v.h)
+		keyBytes := []byte(k)
+		b.set(keyBytes, v, hashes[k])
 	}
 	b.mu.Unlock()
 	b.limiter.Release(int32(len(keys)))
