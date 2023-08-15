@@ -507,8 +507,9 @@ func (b *bucket) setBatch(keys map[string]*bufferValue) {
 		b.set([]byte(k), v.V, v.h)
 	}
 	b.mu.Unlock()
+	now := time.Now().UnixMilli()
 	for k, _ := range keys {
-		b.dedupBuffer.Set(k, time.Now().UnixMilli())
+		b.dedupBuffer.Set(k, now)
 	}
 	runtime.Gosched()
 }
