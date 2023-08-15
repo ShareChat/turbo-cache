@@ -6,7 +6,6 @@ package turbocache
 import (
 	"fmt"
 	xxhash "github.com/cespare/xxhash/v2"
-	"github.com/prgsmall/ringmap"
 	"math/rand"
 	"runtime"
 	"sync"
@@ -272,7 +271,6 @@ type bucket struct {
 	chunks [][]byte
 
 	setBuf      chan *insertValue
-	dedupBuffer *ringmap.RingMap
 	stopWriting chan *struct{}
 	dropWriting bool
 	// m maps hash(k) to idx of (k, v) pair in chunks.
@@ -316,7 +314,6 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 
 func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 	b.setBuf = make(chan *insertValue, setBufSize)
-	b.dedupBuffer = ringmap.NewRingMap(setBufSize)
 	b.stopWriting = make(chan *struct{})
 	const initSize = 128
 	go func() {
@@ -328,15 +325,10 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 			select {
 			case i := <-b.setBuf:
 				keyStr := string(i.K[:])
-				if v, ok := b.dedupBuffer.Get(keyStr); !ok || i.timeStamp > v.(int64) {
-					buffer[keyStr] = i.V
-					b.dedupBuffer.Set(keyStr, time.Now().UnixMilli())
-					atomic.AddUint64(&b.writeBufferSize, 1)
-					if firstTimeTimestamp == 0 {
-						firstTimeTimestamp = time.Now().UnixMilli()
-					}
-				} else {
-					atomic.AddUint64(&b.duplicatedCount, 1)
+				buffer[keyStr] = i.V
+				atomic.AddUint64(&b.writeBufferSize, 1)
+				if firstTimeTimestamp == 0 {
+					firstTimeTimestamp = time.Now().UnixMilli()
 				}
 
 				if len(buffer) >= maxBatch || (len(buffer) > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval) {
@@ -485,16 +477,10 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 			atomic.AddUint64(&b.dropsInQueue, 1)
 			return
 		}
-		now := time.Now().UnixMilli()
-		if dv, ok := b.dedupBuffer.Get(string(k[:])); !ok || now > dv.(int64) {
-			b.setBuf <- &insertValue{
-				K:         k,
-				V:         v,
-				h:         h,
-				timeStamp: now,
-			}
+		b.setBuf <- &insertValue{
+			K: k,
+			V: v,
 		}
-
 	}
 }
 
@@ -511,14 +497,14 @@ func (b *bucket) setWithLock(k, v []byte, h uint64) {
 }
 
 func (b *bucket) setBatch(keys map[string][]byte) {
-	if !b.limiter.Acquire(int32(len(keys))) {
-		atomic.AddUint64(&b.droppedWrites, uint64(len(keys)))
-		return
-	}
 	atomic.AddUint64(&b.batchSetCalls, 1)
 	hashes := make(map[string]uint64, len(keys))
 	for k, _ := range keys {
 		hashes[k] = xxhash.Sum64([]byte(k))
+	}
+	if !b.limiter.Acquire(int32(len(keys))) {
+		atomic.AddUint64(&b.droppedWrites, uint64(len(keys)))
+		return
 	}
 	b.mu.Lock()
 	for k, v := range keys {
@@ -527,6 +513,7 @@ func (b *bucket) setBatch(keys map[string][]byte) {
 	}
 	b.mu.Unlock()
 	b.limiter.Release(int32(len(keys)))
+
 	runtime.Gosched()
 }
 
@@ -586,13 +573,7 @@ func (b *bucket) Del(h uint64) {
 }
 
 type insertValue struct {
-	K, V      []byte
-	h         uint64
-	timeStamp int64
-}
-type bufferValue struct {
-	V []byte
-	h uint64
+	K, V []byte
 }
 
 type Config struct {
