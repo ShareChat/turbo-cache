@@ -490,34 +490,24 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 }
 
 func (b *bucket) setWithLock(k, v []byte, h uint64) {
-	if !b.limiter.Do(func() {
-		b.mu.Lock()
-		defer b.mu.Unlock()
-		b.set(k, v, h)
-	}, 1) {
-		atomic.AddUint64(&b.droppedWrites, 1)
-	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.set(k, v, h)
 }
 
 func (b *bucket) setBatch(keys map[string][]byte) {
-	keyCount := int32(len(keys))
-	if !b.limiter.Do(func() {
-		atomic.AddUint64(&b.batchSetCalls, 1)
-		hashes := make(map[string]uint64, len(keys))
-		for k, _ := range keys {
-			hashes[k] = xxhash.Sum64([]byte(k))
-		}
-		b.mu.Lock()
-		for k, bytes := range keys {
-			kArray := []byte(k)
-			b.set(kArray, bytes, hashes[k])
-		}
-		b.mu.Unlock()
-		runtime.Gosched()
-	}, keyCount) {
-		atomic.AddUint64(&b.droppedWrites, uint64(keyCount))
+	atomic.AddUint64(&b.batchSetCalls, 1)
+	hashes := make(map[string]uint64, len(keys))
+	for k, _ := range keys {
+		hashes[k] = xxhash.Sum64([]byte(k))
 	}
-
+	b.mu.Lock()
+	for k, bytes := range keys {
+		kArray := []byte(k)
+		b.set(kArray, bytes, hashes[k])
+	}
+	b.mu.Unlock()
+	runtime.Gosched()
 }
 
 func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool, collectMetrics bool) ([]byte, bool) {
