@@ -7,7 +7,6 @@ import (
 	"fmt"
 	xxhash "github.com/cespare/xxhash/v2"
 	"math/rand"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -485,12 +484,6 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 }
 
 func (b *bucket) setWithLock(k, v []byte, h uint64) {
-	if b.limiter.Acquire(1) {
-		defer b.limiter.Release(1)
-	} else {
-		atomic.AddUint64(&b.droppedWrites, 1)
-		return
-	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.set(k, v, h)
@@ -502,19 +495,13 @@ func (b *bucket) setBatch(keys map[string][]byte) {
 	for k, _ := range keys {
 		hashes[k] = xxhash.Sum64([]byte(k))
 	}
-	if !b.limiter.Acquire(1) {
-		atomic.AddUint64(&b.droppedWrites, uint64(len(keys)))
-		return
-	}
+
 	b.mu.Lock()
 	for k, v := range keys {
 		keyBytes := []byte(k)
 		b.set(keyBytes, v, hashes[k])
 	}
 	b.mu.Unlock()
-	b.limiter.Release(1)
-
-	runtime.Gosched()
 }
 
 func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
