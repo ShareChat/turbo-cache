@@ -32,7 +32,7 @@ func testSetGetBig(t *testing.T, c *Cache, valueSize, valuesCount, seed int) {
 		}
 	}
 	var s Stats
-	c.UpdateStats(&s)
+	c.UpdateStats(&s, false)
 	if s.SetBigCalls < uint64(valuesCount) {
 		t.Fatalf("expecting SetBigCalls >= %d; got %d", valuesCount, s.SetBigCalls)
 	}

@@ -96,7 +96,7 @@ func TestCacheWrap(t *testing.T) {
 	}
 
 	var s Stats
-	c.UpdateStats(&s)
+	c.UpdateStats(&s, false)
 	getCalls := calls / 10
 	if s.GetCalls != getCalls {
 		t.Fatalf("unexpected number of getCalls; got %d; want %d", s.GetCalls, getCalls)
@@ -240,7 +240,7 @@ func TestShouldDropWritingOnBufferOverflow(t *testing.T) {
 		c.Set([]byte(fmt.Sprintf("key %d", i)), []byte(fmt.Sprintf("value %d", i)))
 	}
 	var s Stats
-	c.UpdateStats(&s)
+	c.UpdateStats(&s, true)
 	if s.DropsInQueue == 0 {
 		t.Fatalf("drop writes should be presented")
 	}
@@ -264,7 +264,7 @@ func TestShouldDropWritingOnLimitSetting(t *testing.T) {
 	}
 	wg.Wait()
 	var s Stats
-	c.UpdateStats(&s)
+	c.UpdateStats(&s, false)
 	if s.DroppedWrites == 0 {
 		t.Fatalf("drop writes should be presented")
 	}
@@ -305,7 +305,7 @@ func TestCacheResetUpdateStatsSetConcurrent(t *testing.T) {
 				case <-stopCh:
 					return
 				default:
-					c.UpdateStats(&s)
+					c.UpdateStats(&s, false)
 					runtime.Gosched()
 				}
 			}
