@@ -17,7 +17,7 @@ const l1CacheSize = 16 * 1024
 const defaultMaxWriteSizeBatch = 250
 const defaultFlushIntervalMillis = 5
 
-const bucketsCount = 512
+const bucketsCount = 1024
 
 const chunkSize = 64 * 1024
 
