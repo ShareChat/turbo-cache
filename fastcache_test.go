@@ -98,6 +98,9 @@ func TestCacheWrap(t *testing.T) {
 	var s Stats
 	c.UpdateStats(&s, false)
 	getCalls := calls / 10
+	if s.DropsInQueue > calls/10 {
+		t.Fatalf("unexpected number of DropsInQueue; got %d; want %d", s.DropsInQueue, 0)
+	}
 	if s.GetCalls != getCalls {
 		t.Fatalf("unexpected number of getCalls; got %d; want %d", s.GetCalls, getCalls)
 	}

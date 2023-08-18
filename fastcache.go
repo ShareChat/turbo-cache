@@ -13,7 +13,7 @@ import (
 )
 
 const setBufSize = 1 * 1024
-const l1CacheSize = 4 * 1024
+const l1CacheSize = 16 * 1024
 const defaultMaxWriteSizeBatch = 250
 const defaultFlushIntervalMillis = 5
 
@@ -278,7 +278,7 @@ type bucket struct {
 	dropWriting bool
 	// m maps hash(k) to idx of (k, v) pair in chunks.
 	m           map[uint64]uint64
-	writeBuffer []atomic.Pointer[bufferValue]
+	writeBuffer []bufferValue
 	// idx points to chunks for writing the next (k, v) pair.
 	idx uint64
 
@@ -308,9 +308,9 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 	maxChunks := (maxBytes + chunkSize - 1) / chunkSize
 	b.chunks = make([][]byte, maxChunks)
 	b.m = make(map[uint64]uint64)
-	b.writeBuffer = make([]atomic.Pointer[bufferValue], l1CacheSize)
+	b.writeBuffer = make([]bufferValue, l1CacheSize)
 	for i := 0; i < l1CacheSize; i++ {
-		b.writeBuffer[i] = atomic.Pointer[bufferValue]{}
+		b.writeBuffer[i].data.Store(makeDataBufferValue(nil, nil, true))
 	}
 	b.Reset()
 	b.limiter = writeLimiter
@@ -488,12 +488,9 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 			atomic.AddUint64(&b.dropsInQueue, 1)
 			return
 		}
-		l1Item := b.writeBuffer[h%l1CacheSize].Load()
-		if l1Item != nil && l1Item.h == h && !l1Item.isSet.Load() {
-			atomic.AddUint64(&b.dropsInQueue, 1)
-			return
-		}
-		if b.writeBuffer[h%l1CacheSize].CompareAndSwap(l1Item, newL1CacheItem(k, v, h)) {
+		//race condition here between isFlushed and data. but it's ok sometimes to lose here data
+		l1Item := b.writeBuffer[h%l1CacheSize].data.Load()
+		if (*l1Item)[2][0] == 1 && b.writeBuffer[h%l1CacheSize].data.CompareAndSwap(l1Item, makeDataBufferValue(k, v, false)) {
 			b.setBuf <- &insertValue{
 				h: h,
 			}
@@ -501,7 +498,6 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 			atomic.AddUint64(&b.dropsInQueue, 1)
 			return
 		}
-
 	}
 }
 
@@ -515,10 +511,10 @@ func (b *bucket) setBatch(keys map[uint64][]byte) {
 	atomic.AddUint64(&b.batchSetCalls, 1)
 
 	b.mu.Lock()
-	for k, _ := range keys {
-		l1CacheItem := b.writeBuffer[k%l1CacheSize].Load()
-		b.set(l1CacheItem.K, l1CacheItem.V, l1CacheItem.h)
-		l1CacheItem.isSet.Store(true)
+	for h, _ := range keys {
+		l1CacheItem := b.writeBuffer[h%l1CacheSize].data.Load()
+		b.set((*l1CacheItem)[0], (*l1CacheItem)[1], h)
+		b.writeBuffer[h%l1CacheSize].data.Store(makeDataBufferValue((*l1CacheItem)[0], (*l1CacheItem)[1], true))
 	}
 	b.mu.Unlock()
 }
@@ -528,9 +524,9 @@ func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
 
 	found := false
 
-	cachedValue := b.writeBuffer[h%l1CacheSize].Load()
-	if cachedValue != nil && cachedValue.h == h && string(cachedValue.K) == string(k) {
-		return cachedValue.V, true
+	cachedValue := b.writeBuffer[h%l1CacheSize].data.Load()
+	if string((*cachedValue)[0]) == string(k) {
+		return (*cachedValue)[1], true
 	}
 	chunks := b.chunks
 	b.mu.RLock()
@@ -620,14 +616,21 @@ func NewConfigWithDroppingOnContention(maxBytes int, flushInterval int64, maxWri
 		concurrentWriteLimit:      writeConcurrentLimit,
 	}
 }
-func newL1CacheItem(k, v []byte, h uint64) *bufferValue {
-	r := &bufferValue{K: k, V: v, h: h}
-	r.isSet.Store(false)
-	return r
+
+func makeDataBufferValue(k, v []byte, flush bool) *[][]byte {
+	r := make([][]byte, 3)
+	r[0] = k
+	r[1] = v
+	r[2] = make([]byte, 1)
+	if flush {
+		r[2][0] = 1
+	} else {
+		r[2][0] = 0
+	}
+	return &r
 }
 
 type bufferValue struct {
-	K, V  []byte
-	isSet atomic.Bool
-	h     uint64
+	isFlushed atomic.Bool
+	data      atomic.Pointer[[][]byte]
 }
