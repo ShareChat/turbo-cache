@@ -16,7 +16,7 @@ const setBufSize = 1 * 1024
 const defaultMaxWriteSizeBatch = 250
 const defaultFlushIntervalMillis = 5
 
-const bucketsCount = 512
+const bucketsCount = 2048
 
 const chunkSize = 64 * 1024
 
@@ -391,11 +391,13 @@ func (b *bucket) cleanLocked() {
 }
 
 func (b *bucket) UpdateStats(s *Stats, details bool) {
-	s.GetCalls += atomic.LoadUint64(&b.getCalls)
-	s.BucketGetCalls = append(s.BucketGetCalls, s.GetCalls)
+	getCalls := atomic.LoadUint64(&b.getCalls)
+	s.GetCalls += getCalls
+	s.BucketGetCalls = append(s.BucketGetCalls, getCalls)
 
-	s.SetCalls += atomic.LoadUint64(&b.setCalls)
-	s.BucketsSetCalls = append(s.BucketsSetCalls, s.SetCalls)
+	setCalls := atomic.LoadUint64(&b.setCalls)
+	s.SetCalls += setCalls
+	s.BucketsSetCalls = append(s.BucketsSetCalls, setCalls)
 	s.Misses += atomic.LoadUint64(&b.misses)
 	s.Collisions += atomic.LoadUint64(&b.collisions)
 	s.Corruptions += atomic.LoadUint64(&b.corruptions)
