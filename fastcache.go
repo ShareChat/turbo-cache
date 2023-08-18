@@ -33,10 +33,11 @@ const maxBucketSize uint64 = 1 << bucketSizeBits
 // Use Cache.UpdateStats for obtaining fresh stats from the cache.
 type Stats struct {
 	// GetCalls is the number of Get calls.
-	GetCalls uint64
-
+	GetCalls       uint64
+	BucketGetCalls []uint64
 	// SetCalls is the number of Set calls.
 	SetCalls        uint64
+	BucketsSetCalls []uint64
 	SetBatchCalls   uint64
 	DuplicatedCount uint64
 	// Misses is the number of cache misses.
@@ -248,10 +249,12 @@ func (c *Cache) Close() {
 // UpdateStats adds cache stats to s.
 //
 // Call s.Reset before calling UpdateStats if s is re-used.
-func (c *Cache) UpdateStats(s *Stats) {
+func (c *Cache) UpdateStats(s *Stats, details bool) {
 	s.WriteQueueSize = 0
+	s.BucketGetCalls = make([]uint64, 0, bucketsCount)
+	s.BucketsSetCalls = make([]uint64, 0, bucketsCount)
 	for i := range c.buckets[:] {
-		c.buckets[i].UpdateStats(s)
+		c.buckets[i].UpdateStats(s, details)
 	}
 	s.GetBigCalls += atomic.LoadUint64(&c.bigStats.GetBigCalls)
 	s.SetBigCalls += atomic.LoadUint64(&c.bigStats.SetBigCalls)
@@ -387,9 +390,12 @@ func (b *bucket) cleanLocked() {
 	}
 }
 
-func (b *bucket) UpdateStats(s *Stats) {
+func (b *bucket) UpdateStats(s *Stats, details bool) {
 	s.GetCalls += atomic.LoadUint64(&b.getCalls)
+	s.BucketGetCalls = append(s.BucketGetCalls, s.GetCalls)
+
 	s.SetCalls += atomic.LoadUint64(&b.setCalls)
+	s.BucketsSetCalls = append(s.BucketsSetCalls, s.SetCalls)
 	s.Misses += atomic.LoadUint64(&b.misses)
 	s.Collisions += atomic.LoadUint64(&b.collisions)
 	s.Corruptions += atomic.LoadUint64(&b.corruptions)
