@@ -322,16 +322,16 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 }
 
 func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
-	const initSize = 128
+	const initSize = 32
 	go func() {
 		b.randomDelay(flushInterval)
 		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
 		var firstTimeTimestamp int64
-		buffer := make(map[uint64][]byte, initSize)
+		buffer := make([]uint64, initSize)
 		for {
 			select {
 			case i := <-b.setBuf:
-				buffer[i.h] = make([]byte, 0)
+				buffer = append(buffer, i.h)
 				atomic.AddUint64(&b.writeBufferSize, 1)
 				if firstTimeTimestamp == 0 {
 					firstTimeTimestamp = time.Now().UnixMilli()
@@ -341,14 +341,14 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 					b.setBatch(buffer)
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					firstTimeTimestamp = 0
-					buffer = make(map[uint64][]byte, initSize)
+					buffer = make([]uint64, initSize)
 				}
 			case _ = <-t:
 				if len(buffer) > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval {
 					b.setBatch(buffer)
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					firstTimeTimestamp = 0
-					buffer = make(map[uint64][]byte, initSize)
+					buffer = make([]uint64, initSize)
 				}
 			case <-b.stopWriting:
 				return
@@ -507,11 +507,11 @@ func (b *bucket) setWithLock(k, v []byte, h uint64) {
 	b.set(k, v, h)
 }
 
-func (b *bucket) setBatch(keys map[uint64][]byte) {
+func (b *bucket) setBatch(hashes []uint64) {
 	atomic.AddUint64(&b.batchSetCalls, 1)
 
 	b.mu.Lock()
-	for h, _ := range keys {
+	for _, h := range hashes {
 		l1CacheItem := b.writeBuffer[h%l1CacheSize].data.Load()
 		b.set((*l1CacheItem)[0], (*l1CacheItem)[1], h)
 		b.writeBuffer[h%l1CacheSize].data.Store(makeDataBufferValue((*l1CacheItem)[0], (*l1CacheItem)[1], true))
