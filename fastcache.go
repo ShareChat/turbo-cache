@@ -317,34 +317,38 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 	b.setBuf = make(chan *insertValue, setBufSize)
 	b.stopWriting = make(chan *struct{})
-	const initSize = 128
 	go func() {
 		b.randomDelay(flushInterval)
 		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
 		var firstTimeTimestamp int64
-		buffer := make(map[string][]byte, initSize)
+		keys := make([][]byte, maxBatch)
+		values := make([][]byte, maxBatch)
+		hashes := make([]uint64, maxBatch)
+		index := 0
 		for {
 			select {
 			case i := <-b.setBuf:
-				keyStr := string(i.K[:])
-				buffer[keyStr] = i.V
+				keys[index] = i.K
+				values[index] = i.V
+				hashes[index] = xxhash.Sum64(i.K)
+				index++
 				atomic.AddUint64(&b.writeBufferSize, 1)
 				if firstTimeTimestamp == 0 {
 					firstTimeTimestamp = time.Now().UnixMilli()
 				}
 
-				if len(buffer) >= maxBatch || (len(buffer) > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval) {
-					b.setBatch(buffer)
+				if len(keys) >= maxBatch || (len(keys) > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval) {
+					b.setBatch(keys, values, hashes, index)
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					firstTimeTimestamp = 0
-					buffer = make(map[string][]byte, initSize)
+					index = 0
 				}
 			case _ = <-t:
-				if len(buffer) > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval {
-					b.setBatch(buffer)
+				if len(keys) > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval {
+					b.setBatch(keys, values, hashes, index)
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					firstTimeTimestamp = 0
-					buffer = make(map[string][]byte, initSize)
+					index = 0
 				}
 			case <-b.stopWriting:
 				return
@@ -497,17 +501,12 @@ func (b *bucket) setWithLock(k, v []byte, h uint64) {
 	b.set(k, v, h)
 }
 
-func (b *bucket) setBatch(keys map[string][]byte) {
+func (b *bucket) setBatch(keys, values [][]byte, hashes []uint64, size int) {
 	atomic.AddUint64(&b.batchSetCalls, 1)
-	hashes := make(map[string]uint64, len(keys))
-	for k, _ := range keys {
-		hashes[k] = xxhash.Sum64([]byte(k))
-	}
 
 	b.mu.Lock()
-	for k, v := range keys {
-		keyBytes := []byte(k)
-		b.set(keyBytes, v, hashes[k])
+	for i := 0; i < size; i++ {
+		b.set(keys[i], values[i], hashes[i])
 	}
 	b.mu.Unlock()
 }
