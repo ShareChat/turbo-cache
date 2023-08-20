@@ -279,7 +279,7 @@ type bucket struct {
 	m map[uint64]uint64
 
 	// idx points to chunks for writing the next (k, v) pair.
-	idx uint64
+	idx atomic.Uint64
 
 	// gen is the generation of chunks.
 	gen uint64
@@ -370,7 +370,7 @@ func (b *bucket) Reset() {
 		chunks[i] = nil
 	}
 	b.m = make(map[uint64]uint64)
-	b.idx = 0
+	b.idx.Store(0)
 	b.gen = 1
 	b.mu.Unlock()
 	atomic.StoreUint64(&b.getCalls, 0)
@@ -380,13 +380,13 @@ func (b *bucket) Reset() {
 	atomic.StoreUint64(&b.corruptions, 0)
 }
 
-func (b *bucket) cleanLocked() {
+func (b *bucket) cleanLocked(idx uint64) {
 	bGen := b.gen & ((1 << genSizeBits) - 1)
-	bIdx := b.idx
+	bIdx := idx
 	bm := b.m
 	for k, v := range bm {
 		gen := v >> bucketSizeBits
-		idx := v & ((1 << bucketSizeBits) - 1)
+		idx = v & ((1 << bucketSizeBits) - 1)
 		if (gen+1 == bGen || gen == maxGen && bGen == 1) && idx >= bIdx || gen == bGen && idx < bIdx {
 			continue
 		}
@@ -422,30 +422,9 @@ func (b *bucket) UpdateStats(s *Stats, details bool) {
 	s.BytesSize += bytesSize
 }
 
-func (b *bucket) set(k, v []byte, h uint64) {
-	atomic.AddUint64(&b.setCalls, 1)
-	if len(k) >= (1<<16) || len(v) >= (1<<16) {
-		// Too big key or value - its length cannot be encoded
-		// with 2 bytes (see below). Skip the entry.
-		return
-	}
-	var kvLenBuf [4]byte
-	kvLenBuf[0] = byte(uint16(len(k)) >> 8)
-	kvLenBuf[1] = byte(len(k))
-	kvLenBuf[2] = byte(uint16(len(v)) >> 8)
-	kvLenBuf[3] = byte(len(v))
-	kvLen := uint64(len(kvLenBuf) + len(k) + len(v))
-	if kvLen >= chunkSize {
-		// Do not store too big keys and values, since they do not
-		// fit a chunk.
-		return
-	}
-
+func (b *bucket) set(k, v []byte, h uint64, kvLenBuf [4]byte, kvLen uint64, idx uint64, chunkIdx uint64, needClean bool) (newNeedClean bool, newIdx uint64, newChunkId uint64) {
 	chunks := b.chunks
-	needClean := false
-	idx := b.idx
 	idxNew := idx + kvLen
-	chunkIdx := idx / chunkSize
 	chunkIdxNew := idxNew / chunkSize
 	if chunkIdxNew > chunkIdx {
 		if chunkIdxNew >= uint64(len(chunks)) {
@@ -474,11 +453,26 @@ func (b *bucket) set(k, v []byte, h uint64) {
 	chunk = append(chunk, v...)
 	chunks[chunkIdx] = chunk
 	b.m[h] = idx | (b.gen << bucketSizeBits)
-	b.idx = idxNew
-	if needClean {
-		b.cleanLocked()
-	}
+
+	return needClean, idxNew, chunkIdxNew
 }
+
+/*
+	func (b *bucket) setBatchUnlock(keys, values [][]byte, hashes []uint64, size int) (idxList []uint64, newChunks [][]byte, newIdx uint64, needClean bool) {
+		idxList = make([]uint64, size)
+		newChunks = make([][]byte, size)
+		idx := b.idx.Load()
+		chunkIdx := idx / chunkSize
+		for i := 0; i < size; i++ {
+			kvLenBuf, kvLen := b.kvLenBuf(keys[i], values[i])
+			if kvLen[i] > 0 && kvLen[i] < chunkSize {
+				needClean, idx, chunkIdx = b.set(keys[i], values[i], hashes[i], kvLenBuf, kvLen, idx, chunkIdx, needClean)
+			}
+		}
+
+		panic("23")
+	}
+*/
 
 func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 	if sync {
@@ -496,18 +490,63 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 }
 
 func (b *bucket) setWithLock(k, v []byte, h uint64) {
+	atomic.AddUint64(&b.setCalls, 1)
+	if len(k) >= (1<<16) || len(v) >= (1<<16) {
+		// Too big key or value - its length cannot be encoded
+		// with 2 bytes (see below). Skip the entry.
+		return
+	}
+	kvLenBuf, kvLen := b.kvLenBuf(k, v)
+	needClean := false
 	b.mu.Lock()
+	idx := b.idx.Load()
+	chunkIdx := idx / chunkSize
 	defer b.mu.Unlock()
-	b.set(k, v, h)
+	if needClean, idx, _ = b.set(k, v, h, kvLenBuf, kvLen, idx, chunkIdx, needClean); needClean {
+		b.cleanLocked(idx)
+	}
+	b.idx.Store(idx)
+}
+
+func (b *bucket) kvLenBuf(k []byte, v []byte) ([4]byte, uint64) {
+
+	var kvLenBuf [4]byte
+	kvLenBuf[0] = byte(uint16(len(k)) >> 8)
+	kvLenBuf[1] = byte(len(k))
+	kvLenBuf[2] = byte(uint16(len(v)) >> 8)
+	kvLenBuf[3] = byte(len(v))
+	kvLen := uint64(len(kvLenBuf) + len(k) + len(v))
+	return kvLenBuf, kvLen
 }
 
 func (b *bucket) setBatch(keys, values [][]byte, hashes []uint64, size int) {
 	atomic.AddUint64(&b.batchSetCalls, 1)
+	atomic.AddUint64(&b.setCalls, uint64(size))
 
+	kvLenBuf := make([][4]byte, size)
+	kvLen := make([]uint64, size)
+	for i := 0; i < size; i++ {
+		if len(keys[i]) >= (1<<16) || len(values[i]) >= (1<<16) {
+			// Too big key or value - its length cannot be encoded
+			// with 2 bytes (see below). Skip the entry.
+			continue
+		}
+		kvLenBuf[i], kvLen[i] = b.kvLenBuf(keys[i], values[i])
+	}
+
+	needClean := false
+	idx := b.idx.Load()
+	chunkIdx := idx / chunkSize
 	b.mu.Lock()
 	for i := 0; i < size; i++ {
-		b.set(keys[i], values[i], hashes[i])
+		if kvLen[i] > 0 && kvLen[i] < chunkSize {
+			needClean, idx, chunkIdx = b.set(keys[i], values[i], hashes[i], kvLenBuf[i], kvLen[i], idx, chunkIdx, needClean)
+		}
 	}
+	if needClean {
+		b.cleanLocked(idx)
+	}
+	b.idx.Store(idx)
 	b.mu.Unlock()
 }
 
@@ -517,12 +556,13 @@ func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
 	found := false
 	chunks := b.chunks
 	b.mu.RLock()
+	currentIdx := b.idx.Load()
 	v := b.m[h]
 	bGen := b.gen & ((1 << genSizeBits) - 1)
 	if v > 0 {
 		gen := v >> bucketSizeBits
 		idx := v & ((1 << bucketSizeBits) - 1)
-		if gen == bGen && idx < b.idx || gen+1 == bGen && idx >= b.idx || gen == maxGen && bGen == 1 && idx >= b.idx {
+		if gen == bGen && idx < currentIdx || gen+1 == bGen && idx >= currentIdx || gen == maxGen && bGen == 1 && idx >= currentIdx {
 			chunkIdx := idx / chunkSize
 			if chunkIdx >= uint64(len(chunks)) {
 				goto end
