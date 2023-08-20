@@ -337,14 +337,14 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 					firstTimeTimestamp = time.Now().UnixMilli()
 				}
 
-				if len(keys) >= maxBatch || (len(keys) > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval) {
+				if index >= maxBatch || (len(keys) > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval) {
 					b.setBatch(keys, values, hashes, index)
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					firstTimeTimestamp = 0
 					index = 0
 				}
 			case _ = <-t:
-				if len(keys) > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval {
+				if index > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval {
 					b.setBatch(keys, values, hashes, index)
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					firstTimeTimestamp = 0
@@ -443,6 +443,7 @@ func (b *bucket) set(k, v []byte, h uint64, kvLenBuf [4]byte, kvLen uint64, idx 
 		}
 		chunks[chunkIdx] = chunks[chunkIdx][:0]
 	}
+	//тут лок
 	chunk := chunks[chunkIdx]
 	if chunk == nil {
 		chunk = getChunk()
