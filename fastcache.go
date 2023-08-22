@@ -17,7 +17,7 @@ const l1CacheSize = 16 * 1024
 const defaultMaxWriteSizeBatch = 250
 const defaultFlushIntervalMillis = 5
 
-const bucketsCount = 1024
+const bucketsCount = 512
 
 const chunkSize = 64 * 1024
 
@@ -494,6 +494,7 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 			b.setBuf <- &insertValue{
 				h: h,
 			}
+			bufferPool.Put(*l1Item)
 		} else {
 			atomic.AddUint64(&b.dropsInQueue, 1)
 			return
@@ -515,6 +516,9 @@ func (b *bucket) setBatch(hashes []uint64) {
 		l1CacheItem := b.writeBuffer[h%l1CacheSize].data.Load()
 		b.set((*l1CacheItem)[0], (*l1CacheItem)[1], h)
 		b.writeBuffer[h%l1CacheSize].data.Store(makeDataBufferValue((*l1CacheItem)[0], (*l1CacheItem)[1], true))
+		go func() {
+			bufferPool.Put(*l1CacheItem)
+		}()
 	}
 	b.mu.Unlock()
 }
@@ -617,17 +621,24 @@ func NewConfigWithDroppingOnContention(maxBytes int, flushInterval int64, maxWri
 	}
 }
 
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		r := make([][]byte, 3)
+		r[2] = make([]byte, 1)
+		return r
+	},
+}
+
 func makeDataBufferValue(k, v []byte, flush bool) *[][]byte {
-	r := make([][]byte, 3)
-	r[0] = k
-	r[1] = v
-	r[2] = make([]byte, 1)
+	result := bufferPool.Get().([][]byte)
+	result[0] = k
+	result[1] = v
 	if flush {
-		r[2][0] = 1
+		result[2][0] = 1
 	} else {
-		r[2][0] = 0
+		result[2][0] = 0
 	}
-	return &r
+	return &result
 }
 
 type bufferValue struct {
