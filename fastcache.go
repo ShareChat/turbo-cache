@@ -16,7 +16,7 @@ const setBufSize = 1 * 1024
 const defaultMaxWriteSizeBatch = 250
 const defaultFlushIntervalMillis = 5
 
-const bucketsCount = 64
+const bucketsCount = 512
 
 const chunkSize = 64 * 1024
 
@@ -321,6 +321,7 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 		b.randomDelay(flushInterval)
 		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
 		var firstTimeTimestamp int64
+		keysDedup := make(map[string]byte, maxBatch)
 		keys := make([][]byte, maxBatch)
 		values := make([][]byte, maxBatch)
 		hashes := make([]uint64, maxBatch)
@@ -328,13 +329,16 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 		for {
 			select {
 			case i := <-b.setBuf:
-				keys[index] = i.K
-				values[index] = i.V
-				hashes[index] = xxhash.Sum64(i.K)
-				index++
-				atomic.AddUint64(&b.writeBufferSize, 1)
-				if firstTimeTimestamp == 0 {
-					firstTimeTimestamp = time.Now().UnixMilli()
+				if _, ok := keysDedup[string(i.K)]; ok {
+					keysDedup[string(i.K)] = 0
+					keys[index] = i.K
+					values[index] = i.V
+					hashes[index] = xxhash.Sum64(i.K)
+					index++
+					atomic.AddUint64(&b.writeBufferSize, 1)
+					if firstTimeTimestamp == 0 {
+						firstTimeTimestamp = time.Now().UnixMilli()
+					}
 				}
 
 				if index >= maxBatch || (index > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval) {
@@ -342,6 +346,7 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					firstTimeTimestamp = 0
 					index = 0
+					keysDedup = make(map[string]byte, maxBatch)
 				}
 			case _ = <-t:
 				if index > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval {
@@ -349,6 +354,7 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					firstTimeTimestamp = 0
 					index = 0
+					keysDedup = make(map[string]byte, maxBatch)
 				}
 			case <-b.stopWriting:
 				return
