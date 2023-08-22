@@ -336,7 +336,7 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 					keysDedup[h%dedupCacheSize] = true
 					keys[index] = i.K
 					values[index] = i.V
-					hashes[index] = xxhash.Sum64(i.K)
+					hashes[index] = h
 					index++
 					atomic.AddUint64(&b.writeBufferSize, 1)
 					if firstTimeTimestamp == 0 {
