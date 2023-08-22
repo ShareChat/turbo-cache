@@ -1,15 +1,21 @@
 // Package fastcache implements fast in-memory cache.
 //
 // The package has been extracted from https://victoriametrics.com/
-package fastcache
+package turbocache
 
 import (
 	"fmt"
+	xxhash "github.com/cespare/xxhash/v2"
+	"math/rand"
 	"sync"
 	"sync/atomic"
-
-	xxhash "github.com/cespare/xxhash/v2"
+	"time"
 )
+
+const setBufSize = 1 * 1024
+const l1CacheSize = 16 * 1024
+const defaultMaxWriteSizeBatch = 250
+const defaultFlushIntervalMillis = 5
 
 const bucketsCount = 512
 
@@ -28,11 +34,13 @@ const maxBucketSize uint64 = 1 << bucketSizeBits
 // Use Cache.UpdateStats for obtaining fresh stats from the cache.
 type Stats struct {
 	// GetCalls is the number of Get calls.
-	GetCalls uint64
-
+	GetCalls       uint64
+	BucketGetCalls []uint64
 	// SetCalls is the number of Set calls.
-	SetCalls uint64
-
+	SetCalls        uint64
+	BucketsSetCalls []uint64
+	SetBatchCalls   uint64
+	DuplicatedCount uint64
 	// Misses is the number of cache misses.
 	Misses uint64
 
@@ -55,6 +63,13 @@ type Stats struct {
 
 	// MaxBytesSize is the maximum allowed size of the cache in bytes (aka capacity).
 	MaxBytesSize uint64
+	// drops due to buffer overflow
+	DropsInQueue uint64
+	// Drops due to write limit
+	DroppedWrites uint64
+	//queue write
+	WriteQueueSize   uint64
+	OnFlightSetCalls uint64
 
 	// BigStats contains stats for GetBig/SetBig methods.
 	BigStats
@@ -98,6 +113,10 @@ func (bs *BigStats) reset() {
 	atomic.StoreUint64(&bs.InvalidValueHashErrors, 0)
 }
 
+func (b *bucket) stopAsyncWriting() {
+	b.stopWriting <- &struct{}{}
+}
+
 // Cache is a fast thread-safe inmemory cache optimized for big number
 // of entries.
 //
@@ -112,6 +131,10 @@ type Cache struct {
 	buckets [bucketsCount]bucket
 
 	bigStats BigStats
+
+	syncWrite bool
+
+	writeLimiter *limiter
 }
 
 // New returns new cache with the given maxBytes capacity in bytes.
@@ -120,14 +143,24 @@ type Cache struct {
 // since the cache holds data in memory.
 //
 // If maxBytes is less than 32MB, then the minimum cache capacity is 32MB.
-func New(maxBytes int) *Cache {
-	if maxBytes <= 0 {
-		panic(fmt.Errorf("maxBytes must be greater than 0; got %d", maxBytes))
+func New(config *Config) *Cache {
+	if config.maxBytes <= 0 {
+		panic(fmt.Errorf("maxBytes must be greater than 0; got %d", config.maxBytes))
 	}
+	if config.flushIntervalMillis == 0 {
+		config.flushIntervalMillis = defaultFlushIntervalMillis
+	}
+	if config.maxWriteBatch == 0 {
+		config.maxWriteBatch = defaultMaxWriteSizeBatch
+	}
+
 	var c Cache
-	maxBucketBytes := uint64((maxBytes + bucketsCount - 1) / bucketsCount)
+	c.syncWrite = config.syncWrite
+	c.writeLimiter = newLimiter(int32(config.concurrentWriteLimit))
+	maxBucketBytes := uint64((config.maxBytes + bucketsCount - 1) / bucketsCount)
 	for i := range c.buckets[:] {
-		c.buckets[i].Init(maxBucketBytes)
+		c.buckets[i].Init(maxBucketBytes, config.flushIntervalMillis, config.maxWriteBatch, config.syncWrite, c.writeLimiter)
+		c.buckets[i].dropWriting = config.dropWriteOnHighContention
 	}
 	return &c
 }
@@ -148,7 +181,13 @@ func New(maxBytes int) *Cache {
 func (c *Cache) Set(k, v []byte) {
 	h := xxhash.Sum64(k)
 	idx := h % bucketsCount
-	c.buckets[idx].Set(k, v, h)
+	c.buckets[idx].Set(k, v, h, c.syncWrite)
+}
+
+func (c *Cache) setSync(k, v []byte) {
+	h := xxhash.Sum64(k)
+	idx := h % bucketsCount
+	c.buckets[idx].setWithLock(k, v, h)
 }
 
 // Get appends value by the key k to dst and returns the result.
@@ -199,12 +238,24 @@ func (c *Cache) Reset() {
 	c.bigStats.reset()
 }
 
+func (c *Cache) Close() {
+	c.Reset()
+	if !c.syncWrite {
+		for i := range c.buckets[:] {
+			c.buckets[i].stopAsyncWriting()
+		}
+	}
+}
+
 // UpdateStats adds cache stats to s.
 //
 // Call s.Reset before calling UpdateStats if s is re-used.
-func (c *Cache) UpdateStats(s *Stats) {
+func (c *Cache) UpdateStats(s *Stats, details bool) {
+	s.WriteQueueSize = 0
+	s.BucketGetCalls = make([]uint64, 0, bucketsCount)
+	s.BucketsSetCalls = make([]uint64, 0, bucketsCount)
 	for i := range c.buckets[:] {
-		c.buckets[i].UpdateStats(s)
+		c.buckets[i].UpdateStats(s, details)
 	}
 	s.GetBigCalls += atomic.LoadUint64(&c.bigStats.GetBigCalls)
 	s.SetBigCalls += atomic.LoadUint64(&c.bigStats.SetBigCalls)
@@ -212,6 +263,7 @@ func (c *Cache) UpdateStats(s *Stats) {
 	s.InvalidMetavalueErrors += atomic.LoadUint64(&c.bigStats.InvalidMetavalueErrors)
 	s.InvalidValueLenErrors += atomic.LoadUint64(&c.bigStats.InvalidValueLenErrors)
 	s.InvalidValueHashErrors += atomic.LoadUint64(&c.bigStats.InvalidValueHashErrors)
+	s.OnFlightSetCalls = uint64(c.writeLimiter.onFlight.Load())
 }
 
 type bucket struct {
@@ -221,23 +273,32 @@ type bucket struct {
 	// It consists of 64KB chunks.
 	chunks [][]byte
 
+	setBuf      chan *insertValue
+	stopWriting chan *struct{}
+	dropWriting bool
 	// m maps hash(k) to idx of (k, v) pair in chunks.
-	m map[uint64]uint64
-
+	m           map[uint64]uint64
+	writeBuffer []bufferValue
 	// idx points to chunks for writing the next (k, v) pair.
 	idx uint64
 
 	// gen is the generation of chunks.
 	gen uint64
 
-	getCalls    uint64
-	setCalls    uint64
-	misses      uint64
-	collisions  uint64
-	corruptions uint64
+	getCalls        uint64
+	setCalls        uint64
+	batchSetCalls   uint64
+	misses          uint64
+	collisions      uint64
+	corruptions     uint64
+	writeBufferSize uint64
+	dropsInQueue    uint64
+	droppedWrites   uint64
+	duplicatedCount uint64
+	limiter         *limiter
 }
 
-func (b *bucket) Init(maxBytes uint64) {
+func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWrite bool, writeLimiter *limiter) {
 	if maxBytes == 0 {
 		panic(fmt.Errorf("maxBytes cannot be zero"))
 	}
@@ -247,7 +308,58 @@ func (b *bucket) Init(maxBytes uint64) {
 	maxChunks := (maxBytes + chunkSize - 1) / chunkSize
 	b.chunks = make([][]byte, maxChunks)
 	b.m = make(map[uint64]uint64)
+	b.writeBuffer = make([]bufferValue, l1CacheSize)
+	for i := 0; i < l1CacheSize; i++ {
+		b.writeBuffer[i].data.Store(makeDataBufferValue(nil, nil, true))
+	}
 	b.Reset()
+	b.limiter = writeLimiter
+	b.setBuf = make(chan *insertValue, setBufSize)
+	b.stopWriting = make(chan *struct{})
+	if !syncWrite {
+		b.startProcessingWriteQueue(flushInterval, maxBatch)
+	}
+}
+
+func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
+	const initSize = 32
+	go func() {
+		b.randomDelay(flushInterval)
+		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
+		var firstTimeTimestamp int64
+		buffer := make([]uint64, initSize)
+		for {
+			select {
+			case i := <-b.setBuf:
+				buffer = append(buffer, i.h)
+				atomic.AddUint64(&b.writeBufferSize, 1)
+				if firstTimeTimestamp == 0 {
+					firstTimeTimestamp = time.Now().UnixMilli()
+				}
+
+				if len(buffer) >= maxBatch || (len(buffer) > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval) {
+					b.setBatch(buffer)
+					atomic.StoreUint64(&b.writeBufferSize, 0)
+					firstTimeTimestamp = 0
+					buffer = make([]uint64, initSize)
+				}
+			case _ = <-t:
+				if len(buffer) > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval {
+					b.setBatch(buffer)
+					atomic.StoreUint64(&b.writeBufferSize, 0)
+					firstTimeTimestamp = 0
+					buffer = make([]uint64, initSize)
+				}
+			case <-b.stopWriting:
+				return
+			}
+		}
+	}()
+}
+
+func (b *bucket) randomDelay(maxDelayMillis int64) {
+	jitterDelay := rand.Int63() % (maxDelayMillis * 1000)
+	time.Sleep(time.Duration(jitterDelay) * time.Microsecond)
 }
 
 func (b *bucket) Reset() {
@@ -260,12 +372,12 @@ func (b *bucket) Reset() {
 	b.m = make(map[uint64]uint64)
 	b.idx = 0
 	b.gen = 1
+	b.mu.Unlock()
 	atomic.StoreUint64(&b.getCalls, 0)
 	atomic.StoreUint64(&b.setCalls, 0)
 	atomic.StoreUint64(&b.misses, 0)
 	atomic.StoreUint64(&b.collisions, 0)
 	atomic.StoreUint64(&b.corruptions, 0)
-	b.mu.Unlock()
 }
 
 func (b *bucket) cleanLocked() {
@@ -282,12 +394,22 @@ func (b *bucket) cleanLocked() {
 	}
 }
 
-func (b *bucket) UpdateStats(s *Stats) {
-	s.GetCalls += atomic.LoadUint64(&b.getCalls)
-	s.SetCalls += atomic.LoadUint64(&b.setCalls)
+func (b *bucket) UpdateStats(s *Stats, details bool) {
+	getCallsValue := atomic.LoadUint64(&b.getCalls)
+	s.GetCalls += getCallsValue
+	s.BucketGetCalls = append(s.BucketGetCalls, getCallsValue)
+
+	setCallsValue := atomic.LoadUint64(&b.setCalls)
+	s.SetCalls += setCallsValue
+	s.BucketsSetCalls = append(s.BucketsSetCalls, setCallsValue)
 	s.Misses += atomic.LoadUint64(&b.misses)
 	s.Collisions += atomic.LoadUint64(&b.collisions)
 	s.Corruptions += atomic.LoadUint64(&b.corruptions)
+	s.DropsInQueue += atomic.LoadUint64(&b.dropsInQueue)
+	s.DroppedWrites += atomic.LoadUint64(&b.droppedWrites)
+	s.WriteQueueSize += atomic.LoadUint64(&b.writeBufferSize) + uint64(len(b.setBuf))
+	s.SetBatchCalls += atomic.LoadUint64(&b.batchSetCalls)
+	s.DuplicatedCount += atomic.LoadUint64(&b.duplicatedCount)
 
 	b.mu.RLock()
 	s.EntriesCount += uint64(len(b.m))
@@ -295,12 +417,12 @@ func (b *bucket) UpdateStats(s *Stats) {
 	for _, chunk := range b.chunks {
 		bytesSize += uint64(cap(chunk))
 	}
-	s.BytesSize += bytesSize
 	s.MaxBytesSize += uint64(len(b.chunks)) * chunkSize
 	b.mu.RUnlock()
+	s.BytesSize += bytesSize
 }
 
-func (b *bucket) Set(k, v []byte, h uint64) {
+func (b *bucket) set(k, v []byte, h uint64) {
 	atomic.AddUint64(&b.setCalls, 1)
 	if len(k) >= (1<<16) || len(v) >= (1<<16) {
 		// Too big key or value - its length cannot be encoded
@@ -321,7 +443,6 @@ func (b *bucket) Set(k, v []byte, h uint64) {
 
 	chunks := b.chunks
 	needClean := false
-	b.mu.Lock()
 	idx := b.idx
 	idxNew := idx + kvLen
 	chunkIdx := idx / chunkSize
@@ -357,12 +478,60 @@ func (b *bucket) Set(k, v []byte, h uint64) {
 	if needClean {
 		b.cleanLocked()
 	}
+}
+
+func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
+	if sync {
+		b.setWithLock(k, v, h)
+	} else {
+		if b.dropWriting && len(b.setBuf) >= setBufSize {
+			atomic.AddUint64(&b.dropsInQueue, 1)
+			return
+		}
+		//race condition here between isFlushed and data. but it's ok sometimes to lose here data
+		l1Item := b.writeBuffer[h%l1CacheSize].data.Load()
+		if (*l1Item)[2][0] == 1 && b.writeBuffer[h%l1CacheSize].data.CompareAndSwap(l1Item, makeDataBufferValue(k, v, false)) {
+			b.setBuf <- &insertValue{
+				h: h,
+			}
+			bufferPool.Put(*l1Item)
+		} else {
+			atomic.AddUint64(&b.dropsInQueue, 1)
+			return
+		}
+	}
+}
+
+func (b *bucket) setWithLock(k, v []byte, h uint64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.set(k, v, h)
+}
+
+func (b *bucket) setBatch(hashes []uint64) {
+	atomic.AddUint64(&b.batchSetCalls, 1)
+
+	b.mu.Lock()
+	for _, h := range hashes {
+		l1CacheItem := b.writeBuffer[h%l1CacheSize].data.Load()
+		b.set((*l1CacheItem)[0], (*l1CacheItem)[1], h)
+		b.writeBuffer[h%l1CacheSize].data.Store(makeDataBufferValue((*l1CacheItem)[0], (*l1CacheItem)[1], true))
+		go func() {
+			bufferPool.Put(*l1CacheItem)
+		}()
+	}
 	b.mu.Unlock()
 }
 
 func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
 	atomic.AddUint64(&b.getCalls, 1)
+
 	found := false
+
+	cachedValue := b.writeBuffer[h%l1CacheSize].data.Load()
+	if string((*cachedValue)[0]) == string(k) {
+		return (*cachedValue)[1], true
+	}
 	chunks := b.chunks
 	b.mu.RLock()
 	v := b.m[h]
@@ -373,15 +542,12 @@ func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
 		if gen == bGen && idx < b.idx || gen+1 == bGen && idx >= b.idx || gen == maxGen && bGen == 1 && idx >= b.idx {
 			chunkIdx := idx / chunkSize
 			if chunkIdx >= uint64(len(chunks)) {
-				// Corrupted data during the load from file. Just skip it.
-				atomic.AddUint64(&b.corruptions, 1)
 				goto end
 			}
 			chunk := chunks[chunkIdx]
 			idx %= chunkSize
 			if idx+4 >= chunkSize {
-				// Corrupted data during the load from file. Just skip it.
-				atomic.AddUint64(&b.corruptions, 1)
+				//removed stats for corruption
 				goto end
 			}
 			kvLenBuf := chunk[idx : idx+4]
@@ -389,8 +555,7 @@ func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
 			valLen := (uint64(kvLenBuf[2]) << 8) | uint64(kvLenBuf[3])
 			idx += 4
 			if idx+keyLen+valLen >= chunkSize {
-				// Corrupted data during the load from file. Just skip it.
-				atomic.AddUint64(&b.corruptions, 1)
+				//removed stats for corruption
 				goto end
 			}
 			if string(k) == string(chunk[idx:idx+keyLen]) {
@@ -400,7 +565,7 @@ func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
 				}
 				found = true
 			} else {
-				atomic.AddUint64(&b.collisions, 1)
+				//removed stats for collision
 			}
 		}
 	}
@@ -416,4 +581,67 @@ func (b *bucket) Del(h uint64) {
 	b.mu.Lock()
 	delete(b.m, h)
 	b.mu.Unlock()
+}
+
+type insertValue struct {
+	h uint64
+}
+
+type Config struct {
+	maxBytes                  int
+	flushIntervalMillis       int64
+	maxWriteBatch             int
+	syncWrite                 bool
+	dropWriteOnHighContention bool
+	concurrentWriteLimit      int
+}
+
+func NewSyncWriteConfig(maxBytes int) *Config {
+	return &Config{
+		maxBytes:  maxBytes,
+		syncWrite: true,
+	}
+}
+
+func NewConfig(maxBytes int, flushInterval int64, maxWriteBatch int) *Config {
+	return &Config{
+		maxBytes:            maxBytes,
+		flushIntervalMillis: flushInterval,
+		maxWriteBatch:       maxWriteBatch,
+	}
+}
+
+func NewConfigWithDroppingOnContention(maxBytes int, flushInterval int64, maxWriteBatch int, writeConcurrentLimit int) *Config {
+	return &Config{
+		maxBytes:                  maxBytes,
+		flushIntervalMillis:       flushInterval,
+		maxWriteBatch:             maxWriteBatch,
+		dropWriteOnHighContention: true,
+		concurrentWriteLimit:      writeConcurrentLimit,
+	}
+}
+
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		r := make([][]byte, 3)
+		r[2] = make([]byte, 1)
+		return r
+	},
+}
+
+func makeDataBufferValue(k, v []byte, flush bool) *[][]byte {
+	result := bufferPool.Get().([][]byte)
+	result[0] = k
+	result[1] = v
+	if flush {
+		result[2][0] = 1
+	} else {
+		result[2][0] = 0
+	}
+	return &result
+}
+
+type bufferValue struct {
+	isFlushed atomic.Bool
+	data      atomic.Pointer[[][]byte]
 }

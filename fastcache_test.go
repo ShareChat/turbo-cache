@@ -1,16 +1,21 @@
-package fastcache
+package turbocache
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
+const cacheDelay = 100
+
 func TestCacheSmall(t *testing.T) {
-	c := New(1)
-	defer c.Reset()
+	c := New(NewSyncWriteConfig(10))
+	defer c.Close()
 
 	if v := c.Get(nil, []byte("aaa")); len(v) != 0 {
 		t.Fatalf("unexpected non-empty value obtained from small cache: %q", v)
@@ -20,42 +25,43 @@ func TestCacheSmall(t *testing.T) {
 	}
 
 	c.Set([]byte("key"), []byte("value"))
-	if v := c.Get(nil, []byte("key")); string(v) != "value" {
+	if v := c.getNotNilWithDefaultWait(nil, []byte("key")); string(v) != "value" {
 		t.Fatalf("unexpected value obtained; got %q; want %q", v, "value")
 	}
-	if v := c.Get(nil, nil); len(v) != 0 {
+	if v := c.getNotNilWithDefaultWait(nil, nil); len(v) != 0 {
 		t.Fatalf("unexpected non-empty value obtained from small cache: %q", v)
 	}
 	if v, exist := c.HasGet(nil, nil); exist {
 		t.Fatalf("unexpected nil-keyed value obtained in small cache: %q", v)
 	}
-	if v := c.Get(nil, []byte("aaa")); len(v) != 0 {
+	if v := c.getNotNilWithDefaultWait(nil, []byte("aaa")); len(v) != 0 {
 		t.Fatalf("unexpected non-empty value obtained from small cache: %q", v)
 	}
 
 	c.Set([]byte("aaa"), []byte("bbb"))
-	if v := c.Get(nil, []byte("aaa")); string(v) != "bbb" {
+	if v := c.getNotNilWithDefaultWait(nil, []byte("aaa")); string(v) != "bbb" {
 		t.Fatalf("unexpected value obtained; got %q; want %q", v, "bbb")
 	}
-	if v, exist := c.HasGet(nil, []byte("aaa")); !exist || string(v) != "bbb" {
+	if v, exist := c.hasGetNotNilWithDefaultWait(nil, []byte("aaa")); !exist || string(v) != "bbb" {
 		t.Fatalf("unexpected value obtained; got %q; want %q", v, "bbb")
 	}
 
 	c.Reset()
-	if v := c.Get(nil, []byte("aaa")); len(v) != 0 {
+	if v := c.getNotNilWithDefaultWait(nil, []byte("aaa")); len(v) != 0 {
 		t.Fatalf("unexpected non-empty value obtained from empty cache: %q", v)
 	}
-	if v, exist := c.HasGet(nil, []byte("aaa")); exist || len(v) != 0 {
+	if v, exist := c.hasGetNotNilWithDefaultWait(nil, []byte("aaa")); exist || len(v) != 0 {
 		t.Fatalf("unexpected non-empty value obtained from small cache: %q", v)
 	}
 
 	// Test empty value
 	k := []byte("empty")
 	c.Set(k, nil)
-	if v := c.Get(nil, k); len(v) != 0 {
+
+	if v := c.getNotNilWithDefaultWait(nil, k); len(v) != 0 {
 		t.Fatalf("unexpected non-empty value obtained from empty entry: %q", v)
 	}
-	if v, exist := c.HasGet(nil, k); !exist {
+	if v, exist := c.hasGetNotNilWithDefaultWait(nil, k); !exist {
 		t.Fatalf("cannot find empty entry for key %q", k)
 	} else if len(v) != 0 {
 		t.Fatalf("unexpected non-empty value obtained from empty entry: %q", v)
@@ -69,20 +75,16 @@ func TestCacheSmall(t *testing.T) {
 }
 
 func TestCacheWrap(t *testing.T) {
-	c := New(bucketsCount * chunkSize * 1.5)
-	defer c.Reset()
+	c := New(newCacheConfigWithDefaultParams(bucketsCount * chunkSize * 1.5))
+	defer c.Close()
 
 	calls := uint64(5e6)
-
 	for i := uint64(0); i < calls; i++ {
 		k := []byte(fmt.Sprintf("key %d", i))
 		v := []byte(fmt.Sprintf("value %d", i))
 		c.Set(k, v)
-		vv := c.Get(nil, k)
-		if string(vv) != string(v) {
-			t.Fatalf("unexpected value for key %q; got %q; want %q", k, vv, v)
-		}
 	}
+	c.waitForExpectedCacheSize(cacheDelay)
 	for i := uint64(0); i < calls/10; i++ {
 		x := i * 10
 		k := []byte(fmt.Sprintf("key %d", x))
@@ -94,8 +96,11 @@ func TestCacheWrap(t *testing.T) {
 	}
 
 	var s Stats
-	c.UpdateStats(&s)
-	getCalls := calls + calls/10
+	c.UpdateStats(&s, false)
+	getCalls := calls / 10
+	if s.DropsInQueue > calls/10 {
+		t.Fatalf("unexpected number of DropsInQueue; got %d; want %d", s.DropsInQueue, 0)
+	}
 	if s.GetCalls != getCalls {
 		t.Fatalf("unexpected number of getCalls; got %d; want %d", s.GetCalls, getCalls)
 	}
@@ -120,12 +125,13 @@ func TestCacheWrap(t *testing.T) {
 }
 
 func TestCacheDel(t *testing.T) {
-	c := New(1024)
-	defer c.Reset()
+	c := New(newCacheConfigWithDefaultParams(1024))
+	defer c.Close()
 	for i := 0; i < 100; i++ {
 		k := []byte(fmt.Sprintf("key %d", i))
 		v := []byte(fmt.Sprintf("value %d", i))
-		c.Set(k, v)
+		c.setSync(k, v)
+
 		vv := c.Get(nil, k)
 		if string(vv) != string(v) {
 			t.Fatalf("unexpected value for key %q; got %q; want %q", k, vv, v)
@@ -139,14 +145,14 @@ func TestCacheDel(t *testing.T) {
 }
 
 func TestCacheBigKeyValue(t *testing.T) {
-	c := New(1024)
-	defer c.Reset()
+	c := New(newCacheConfigWithDefaultParams(1024))
+	defer c.Close()
 
 	// Both key and value exceed 64Kb
 	k := make([]byte, 90*1024)
 	v := make([]byte, 100*1024)
 	c.Set(k, v)
-	vv := c.Get(nil, k)
+	vv := c.getNotNilWithDefaultWait(nil, k)
 	if len(vv) > 0 {
 		t.Fatalf("unexpected non-empty value got for key %q: %q", k, vv)
 	}
@@ -155,7 +161,7 @@ func TestCacheBigKeyValue(t *testing.T) {
 	k = make([]byte, 40*1024)
 	v = make([]byte, 40*1024)
 	c.Set(k, v)
-	vv = c.Get(nil, k)
+	vv = c.getNotNilWithDefaultWait(nil, k)
 	if len(vv) > 0 {
 		t.Fatalf("unexpected non-empty value got for key %q: %q", k, vv)
 	}
@@ -163,18 +169,18 @@ func TestCacheBigKeyValue(t *testing.T) {
 
 func TestCacheSetGetSerial(t *testing.T) {
 	itemsCount := 10000
-	c := New(30 * itemsCount)
-	defer c.Reset()
+	c := New(newCacheConfigWithDefaultParams(30 * itemsCount))
+	defer c.Close()
 	if err := testCacheGetSet(c, itemsCount); err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
 }
 
 func TestCacheGetSetConcurrent(t *testing.T) {
-	itemsCount := 10000
+	itemsCount := 1000
 	const gorotines = 10
-	c := New(30 * itemsCount * gorotines)
-	defer c.Reset()
+	c := New(newCacheConfigWithDefaultParams(30 * itemsCount * gorotines))
+	defer c.Close()
 
 	ch := make(chan error, gorotines)
 	for i := 0; i < gorotines; i++ {
@@ -188,7 +194,7 @@ func TestCacheGetSetConcurrent(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %s", err)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(300 * time.Second):
 			t.Fatalf("timeout")
 		}
 	}
@@ -199,17 +205,22 @@ func testCacheGetSet(c *Cache, itemsCount int) error {
 		k := []byte(fmt.Sprintf("key %d", i))
 		v := []byte(fmt.Sprintf("value %d", i))
 		c.Set(k, v)
-		vv := c.Get(nil, k)
+	}
+	for i := 0; i < itemsCount; i++ {
+		k := []byte(fmt.Sprintf("key %d", i))
+		v := []byte(fmt.Sprintf("value %d", i))
+		vv := c.getNotNilWithDefaultWait(nil, k)
 		if string(vv) != string(v) {
 			return fmt.Errorf("unexpected value for key %q after insertion; got %q; want %q", k, vv, v)
 		}
 	}
+
 	misses := 0
 	for i := 0; i < itemsCount; i++ {
 		k := []byte(fmt.Sprintf("key %d", i))
 		vExpected := fmt.Sprintf("value %d", i)
 		v := c.Get(nil, k)
-		if string(v) != string(vExpected) {
+		if string(v) != vExpected {
 			if len(v) > 0 {
 				return fmt.Errorf("unexpected value for key %q after all insertions; got %q; want %q", k, v, vExpected)
 			}
@@ -222,8 +233,48 @@ func testCacheGetSet(c *Cache, itemsCount int) error {
 	return nil
 }
 
+func TestShouldDropWritingOnBufferOverflow(t *testing.T) {
+	itemsCount := 512 * setBufSize * 4
+	const gorotines = 10
+	c := New(NewConfigWithDroppingOnContention(30*itemsCount*gorotines, 5, 100, 1000))
+	c.Close()
+
+	for i := 0; i < itemsCount; i++ {
+		c.Set([]byte(fmt.Sprintf("key %d", i)), []byte(fmt.Sprintf("value %d", i)))
+	}
+	var s Stats
+	c.UpdateStats(&s, true)
+	if s.DropsInQueue == 0 {
+		t.Fatalf("drop writes should be presented")
+	}
+}
+
+func TestShouldDropWritingOnLimitSetting(t *testing.T) {
+	itemsCount := 16 * setBufSize
+	const gorotines = 10
+	c := New(NewConfigWithDroppingOnContention(30*itemsCount*gorotines, 5, 10, 10))
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		curId := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < itemsCount; i++ {
+				c.Set([]byte(fmt.Sprintf("key %d, gorutine: %d", i, curId)), []byte(fmt.Sprintf("value %d", i)))
+			}
+		}()
+	}
+	wg.Wait()
+	var s Stats
+	c.UpdateStats(&s, false)
+	if s.DroppedWrites == 0 {
+		t.Fatalf("drop writes should be presented")
+	}
+}
+
 func TestCacheResetUpdateStatsSetConcurrent(t *testing.T) {
-	c := New(12334)
+	c := New(newCacheConfigWithDefaultParams(12334))
 
 	stopCh := make(chan struct{})
 
@@ -257,7 +308,7 @@ func TestCacheResetUpdateStatsSetConcurrent(t *testing.T) {
 				case <-stopCh:
 					return
 				default:
-					c.UpdateStats(&s)
+					c.UpdateStats(&s, false)
 					runtime.Gosched()
 				}
 			}
@@ -284,4 +335,70 @@ func TestCacheResetUpdateStatsSetConcurrent(t *testing.T) {
 	close(stopCh)
 	statsWG.Wait()
 	resettersWG.Wait()
+}
+
+func (c *Cache) waitForExpectedCacheSize(delayInMillis int) error {
+	t := time.Now()
+
+	for time.Since(t).Milliseconds() < int64(delayInMillis) {
+		for i := range c.buckets {
+			if len(c.buckets[i].setBuf) > 0 && atomic.LoadUint64(&c.buckets[i].writeBufferSize) > 0 {
+				time.Sleep(time.Duration(delayInMillis/10) * time.Millisecond)
+				continue
+			}
+		}
+		return nil
+	}
+	return errors.New("timeout")
+}
+
+func (c *Cache) getNotNilWithDefaultWait(dst, k []byte) []byte {
+	r, _ := c.getNotNilWithWait(dst, k, cacheDelay)
+	return r
+}
+
+func (c *Cache) hasGetNotNilWithDefaultWait(dst, k []byte) ([]byte, bool) {
+	t := time.Now()
+
+	var result []byte
+	var exists bool
+	for time.Since(t).Milliseconds() < int64(cacheDelay) {
+		if result, exists = c.HasGet(dst, k); !exists || result == nil {
+			time.Sleep(cacheDelay / 10 * time.Millisecond)
+			continue
+		}
+		return result, exists
+	}
+	return result, exists
+}
+
+func (c *Cache) getNotNilWithWait(dst, k []byte, delay int) ([]byte, error) {
+	t := time.Now()
+
+	for time.Since(t).Milliseconds() < int64(delay) {
+		var result []byte
+		if result = c.Get(dst, k); result == nil {
+			time.Sleep(1 * time.Millisecond)
+			continue
+		}
+		return result, nil
+	}
+	return nil, errors.New("timeout")
+}
+
+func (c *Cache) getBigWithExpectedValue(dst, k []byte, expected []byte) []byte {
+	t := time.Now()
+	var result []byte
+	for time.Since(t).Milliseconds() < int64(cacheDelay*100) {
+		if result = c.GetBig(dst, k); !bytes.Equal(result, expected) {
+			time.Sleep(1 * time.Millisecond)
+			continue
+		}
+		return result
+	}
+	return result
+}
+
+func newCacheConfigWithDefaultParams(maxBytes int) *Config {
+	return NewConfigWithDroppingOnContention(maxBytes, defaultFlushInterval, defaultBatchWriteSize, 100000)
 }

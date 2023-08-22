@@ -1,4 +1,4 @@
-package fastcache
+package turbocache
 
 import (
 	"fmt"
@@ -9,6 +9,9 @@ import (
 
 	"github.com/allegro/bigcache"
 )
+
+const defaultFlushInterval = 1
+const defaultBatchWriteSize = 5
 
 func BenchmarkBigCacheSet(b *testing.B) {
 	const items = 1 << 16
@@ -128,7 +131,7 @@ func b2s(b []byte) string {
 
 func BenchmarkCacheSet(b *testing.B) {
 	const items = 1 << 16
-	c := New(12 * items)
+	c := New(newCacheConfigWithDefaultParams(12 * items))
 	defer c.Reset()
 	b.ReportAllocs()
 	b.SetBytes(items)
@@ -149,8 +152,8 @@ func BenchmarkCacheSet(b *testing.B) {
 
 func BenchmarkCacheGet(b *testing.B) {
 	const items = 1 << 16
-	c := New(12 * items)
-	defer c.Reset()
+	c := New(newCacheConfigWithDefaultParams(12 * items))
+	defer c.Close()
 	k := []byte("\x00\x00\x00\x00")
 	v := []byte("xyza")
 	for i := 0; i < items; i++ {
@@ -183,8 +186,8 @@ func BenchmarkCacheGet(b *testing.B) {
 
 func BenchmarkCacheHas(b *testing.B) {
 	const items = 1 << 16
-	c := New(12 * items)
-	defer c.Reset()
+	c := New(newCacheConfigWithDefaultParams(12 * items))
+	defer c.Close()
 	k := []byte("\x00\x00\x00\x00")
 	for i := 0; i < items; i++ {
 		k[0]++
@@ -214,8 +217,8 @@ func BenchmarkCacheHas(b *testing.B) {
 
 func BenchmarkCacheSetGet(b *testing.B) {
 	const items = 1 << 16
-	c := New(12 * items)
-	defer c.Reset()
+	c := New(newCacheConfigWithDefaultParams(12 * items))
+	defer c.Close()
 	b.ReportAllocs()
 	b.SetBytes(2 * items)
 	b.RunParallel(func(pb *testing.PB) {

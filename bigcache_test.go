@@ -1,4 +1,4 @@
-package fastcache
+package turbocache
 
 import (
 	"bytes"
@@ -7,7 +7,7 @@ import (
 )
 
 func TestSetGetBig(t *testing.T) {
-	c := New(256 * 1024 * 1024)
+	c := New(NewConfig(256*1024*1024, 3, 100))
 	const valuesCount = 10
 	for _, valueSize := range []int{1, 100, 1<<16 - 1, 1 << 16, 1<<16 + 1, 1 << 17, 1<<17 + 1, 1<<17 - 1, 1 << 19} {
 		t.Run(fmt.Sprintf("valueSize_%d", valueSize), func(t *testing.T) {
@@ -32,7 +32,7 @@ func testSetGetBig(t *testing.T, c *Cache, valueSize, valuesCount, seed int) {
 		}
 	}
 	var s Stats
-	c.UpdateStats(&s)
+	c.UpdateStats(&s, false)
 	if s.SetBigCalls < uint64(valuesCount) {
 		t.Fatalf("expecting SetBigCalls >= %d; got %d", valuesCount, s.SetBigCalls)
 	}

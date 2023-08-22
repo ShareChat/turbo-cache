@@ -1,10 +1,9 @@
-package fastcache
+package turbocache
 
 import (
+	xxhash "github.com/cespare/xxhash/v2"
 	"sync"
 	"sync/atomic"
-
-	xxhash "github.com/cespare/xxhash/v2"
 )
 
 // maxSubvalueLen is the maximum size of subvalue chunk.
@@ -55,13 +54,13 @@ func (c *Cache) SetBig(k, v []byte) {
 		}
 		subvalue := v[:subvalueLen]
 		v = v[subvalueLen:]
-		c.Set(subkey.B, subvalue)
+		c.setSync(subkey.B, subvalue)
 	}
 
 	// Write metavalue, which consists of valueHash and valueLen.
 	subkey.B = marshalUint64(subkey.B[:0], valueHash)
 	subkey.B = marshalUint64(subkey.B, uint64(valueLen))
-	c.Set(k, subkey.B)
+	c.setSync(k, subkey.B)
 	putSubkeyBuf(subkey)
 }
 
