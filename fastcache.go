@@ -276,8 +276,8 @@ type bucket struct {
 	stopWriting chan *struct{}
 	dropWriting bool
 	// m maps hash(k) to idx of (k, v) pair in chunks.
-	m map[uint64]uint64
-
+	m           map[uint64]uint64
+	writeBuffer []atomic.Value
 	// idx points to chunks for writing the next (k, v) pair.
 	idx atomic.Uint64
 
@@ -309,10 +309,16 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 	b.m = make(map[uint64]uint64)
 	b.Reset()
 	b.limiter = writeLimiter
+	b.writeBuffer = make([]atomic.Value, maxBatch*20)
 	if !syncWrite {
 		b.startProcessingWriteQueue(flushInterval, maxBatch)
 	}
 }
+
+var bufferPool = sync.Pool{New: func() any {
+	r := make([]byte, 128)
+	return r
+}}
 
 func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 	b.setBuf = make(chan *insertValue, setBufSize)
@@ -321,21 +327,22 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 		b.randomDelay(flushInterval)
 		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
 		var firstTimeTimestamp int64
-		var dedupCacheSize uint64
-		dedupCacheSize = 2047
-		keysDedup := make([]bool, dedupCacheSize)
-		keys := make([][]byte, maxBatch)
-		values := make([][]byte, maxBatch)
+		dedupCacheSize := uint64(len(b.writeBuffer))
 		hashes := make([]uint64, maxBatch)
 		index := 0
 		for {
 			select {
 			case i := <-b.setBuf:
 				h := xxhash.Sum64(i.K)
-				if !keysDedup[h%dedupCacheSize] {
-					keysDedup[h%dedupCacheSize] = true
-					keys[index] = i.K
-					values[index] = i.V
+				bufValue := b.writeBuffer[h%dedupCacheSize].Load()
+				if bufValue == nil || len(bufValue.([]byte)) == 0 {
+					chunk := bufferPool.Get().([]byte)
+					chunk = chunk[:0]
+					lenBuf := b.kvLenBuf(i.K, i.V)
+					chunk = append(chunk, lenBuf[:]...)
+					chunk = append(chunk, i.K...)
+					chunk = append(chunk, i.V...)
+					b.writeBuffer[h%dedupCacheSize].Store(chunk)
 					hashes[index] = h
 					index++
 					atomic.AddUint64(&b.writeBufferSize, 1)
@@ -345,20 +352,22 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 				}
 
 				if index >= maxBatch || (index > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval) {
-					b.setBatch(keys, values, hashes, index)
+					b.setBatch(hashes, index)
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					for i := 0; i < index; i++ {
-						keysDedup[hashes[i]%dedupCacheSize] = false
+						bufferPool.Put(b.writeBuffer[hashes[i]%dedupCacheSize].Load().([]byte))
+						b.writeBuffer[hashes[i]%dedupCacheSize].Store(make([]byte, 0))
 					}
 					firstTimeTimestamp = 0
 					index = 0
 				}
 			case _ = <-t:
 				if index > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval {
-					b.setBatch(keys, values, hashes, index)
+					b.setBatch(hashes, index)
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					for i := 0; i < index; i++ {
-						keysDedup[hashes[i]%dedupCacheSize] = false
+						bufferPool.Put(b.writeBuffer[hashes[i]%dedupCacheSize].Load().([]byte))
+						b.writeBuffer[hashes[i]%dedupCacheSize].Store(make([]byte, 0))
 					}
 					firstTimeTimestamp = 0
 					index = 0
@@ -435,14 +444,14 @@ func (b *bucket) UpdateStats(s *Stats, details bool) {
 	s.BytesSize += bytesSize
 }
 
-func (b *bucket) set(k, v []byte, h uint64, kvLenBuf [4]byte, kvLen uint64, idx uint64, chunkIdx uint64, needClean bool) (newNeedClean bool, newIdx uint64, newChunkId uint64) {
+func (b *bucket) set(kv []byte, h uint64, idx uint64, chunkIdx uint64, needClean bool) (newNeedClean bool, newIdx uint64, newChunkId uint64) {
 	chunks := b.chunks
-	idxNew := idx + kvLen
+	idxNew := idx + uint64(len(kv))
 	chunkIdxNew := idxNew / chunkSize
 	if chunkIdxNew > chunkIdx {
 		if chunkIdxNew >= uint64(len(chunks)) {
 			idx = 0
-			idxNew = kvLen
+			idxNew = uint64(len(kv))
 			chunkIdx = 0
 			b.gen++
 			if b.gen&((1<<genSizeBits)-1) == 0 {
@@ -451,7 +460,7 @@ func (b *bucket) set(k, v []byte, h uint64, kvLenBuf [4]byte, kvLen uint64, idx 
 			needClean = true
 		} else {
 			idx = chunkIdxNew * chunkSize
-			idxNew = idx + kvLen
+			idxNew = idx + uint64(len(kv))
 			chunkIdx = chunkIdxNew
 		}
 		chunks[chunkIdx] = chunks[chunkIdx][:0]
@@ -462,9 +471,8 @@ func (b *bucket) set(k, v []byte, h uint64, kvLenBuf [4]byte, kvLen uint64, idx 
 		chunk = getChunk()
 		chunk = chunk[:0]
 	}
-	chunk = append(chunk, kvLenBuf[:]...)
-	chunk = append(chunk, k...)
-	chunk = append(chunk, v...)
+	chunk = append(chunk, kv...)
+
 	chunks[chunkIdx] = chunk
 	b.m[h] = idx | (b.gen << bucketSizeBits)
 
@@ -510,51 +518,43 @@ func (b *bucket) setWithLock(k, v []byte, h uint64) {
 		// with 2 bytes (see below). Skip the entry.
 		return
 	}
-	kvLenBuf, kvLen := b.kvLenBuf(k, v)
+	kvLenBuf := b.kvLenBuf(k, v)
+	kv := make([]byte, 0, len(k)+len(v)+4)
+	kv = append(kv, kvLenBuf[:]...)
+	kv = append(kv, k...)
+	kv = append(kv, v...)
 	needClean := false
 	b.mu.Lock()
 	idx := b.idx.Load()
 	chunkIdx := idx / chunkSize
 	defer b.mu.Unlock()
-	if needClean, idx, _ = b.set(k, v, h, kvLenBuf, kvLen, idx, chunkIdx, needClean); needClean {
+	if needClean, idx, _ = b.set(kv, h, idx, chunkIdx, needClean); needClean {
 		b.cleanLocked(idx)
 	}
 	b.idx.Store(idx)
 }
 
-func (b *bucket) kvLenBuf(k []byte, v []byte) ([4]byte, uint64) {
-
+func (b *bucket) kvLenBuf(k []byte, v []byte) [4]byte {
 	var kvLenBuf [4]byte
 	kvLenBuf[0] = byte(uint16(len(k)) >> 8)
 	kvLenBuf[1] = byte(len(k))
 	kvLenBuf[2] = byte(uint16(len(v)) >> 8)
 	kvLenBuf[3] = byte(len(v))
-	kvLen := uint64(len(kvLenBuf) + len(k) + len(v))
-	return kvLenBuf, kvLen
+	return kvLenBuf
 }
 
-func (b *bucket) setBatch(keys, values [][]byte, hashes []uint64, size int) {
+func (b *bucket) setBatch(hashes []uint64, size int) {
 	atomic.AddUint64(&b.batchSetCalls, 1)
 	atomic.AddUint64(&b.setCalls, uint64(size))
-
-	kvLenBuf := make([][4]byte, size)
-	kvLen := make([]uint64, size)
-	for i := 0; i < size; i++ {
-		if len(keys[i]) >= (1<<16) || len(values[i]) >= (1<<16) {
-			// Too big key or value - its length cannot be encoded
-			// with 2 bytes (see below). Skip the entry.
-			continue
-		}
-		kvLenBuf[i], kvLen[i] = b.kvLenBuf(keys[i], values[i])
-	}
 
 	needClean := false
 	idx := b.idx.Load()
 	chunkIdx := idx / chunkSize
 	b.mu.Lock()
 	for i := 0; i < size; i++ {
-		if kvLen[i] > 0 && kvLen[i] < chunkSize {
-			needClean, idx, chunkIdx = b.set(keys[i], values[i], hashes[i], kvLenBuf[i], kvLen[i], idx, chunkIdx, needClean)
+		kv := b.writeBuffer[hashes[i]%uint64(len(b.writeBuffer))].Load().([]byte)
+		if len(kv) > 0 && len(kv) < chunkSize {
+			needClean, idx, chunkIdx = b.set(kv, hashes[i], idx, chunkIdx, needClean)
 		}
 	}
 	if needClean {
@@ -567,6 +567,18 @@ func (b *bucket) setBatch(keys, values [][]byte, hashes []uint64, size int) {
 func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
 	atomic.AddUint64(&b.getCalls, 1)
 
+	kvPtr := b.writeBuffer[h%uint64(len(b.writeBuffer))].Load()
+	if kvPtr != nil && len(kvPtr.([]byte)) > 0 {
+		kv := kvPtr.([]byte)
+		kvLenBuf := kv[0:4]
+		keyLen := (uint64(kvLenBuf[0]) << 8) | uint64(kvLenBuf[1])
+		if string(k) == string(kv[4:4+keyLen]) {
+			if returnDst {
+				dst = append(dst, kv[4+keyLen:]...)
+			}
+			return dst, true
+		}
+	}
 	found := false
 	chunks := b.chunks
 	b.mu.RLock()
