@@ -570,6 +570,7 @@ func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
 	kvPtr := b.writeBuffer[h%uint64(len(b.writeBuffer))].Load()
 	if kvPtr != nil && len(kvPtr.([]byte)) > 0 {
 		kv := kvPtr.([]byte)
+		//can be corrupted:(
 		kvLenBuf := kv[0:4]
 		keyLen := (uint64(kvLenBuf[0]) << 8) | uint64(kvLenBuf[1])
 		if string(k) == string(kv[4:4+keyLen]) {
