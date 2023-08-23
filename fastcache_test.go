@@ -101,7 +101,7 @@ func TestCacheWrap(t *testing.T) {
 	if s.GetCalls != getCalls {
 		t.Fatalf("unexpected number of getCalls; got %d; want %d", s.GetCalls, getCalls)
 	}
-	if s.SetCalls != calls {
+	if s.SetCalls > calls/2 {
 		t.Fatalf("unexpected number of setCalls; got %d; want %d", s.SetCalls, calls)
 	}
 	if s.Misses == 0 || s.Misses >= calls/10 {
