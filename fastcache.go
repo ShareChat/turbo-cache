@@ -324,7 +324,7 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 
 var bufferPool = sync.Pool{New: func() any {
 	r := &bufferItem{
-		data: make([]byte, 128),
+		data: make([]byte, 0, 128),
 	}
 	return r
 }}
@@ -347,11 +347,11 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 				if len(bufValue.(*bufferItem).data) == 0 {
 					lenBuf := b.kvLenBuf(i.K, i.V)
 					bufItem := bufferPool.Get().(*bufferItem)
-					for !bufItem.doLocked(func(data []byte) {
-						data = bufItem.data[:0]
-						data = append(bufItem.data, lenBuf[:]...)
-						data = append(bufItem.data, i.K...)
-						data = append(bufItem.data, i.V...)
+					for !bufItem.doLocked(func(buf *bufferItem) {
+						buf.data = buf.data[:0]
+						buf.data = append(buf.data, lenBuf[:]...)
+						buf.data = append(buf.data, i.K...)
+						buf.data = append(buf.data, i.V...)
 					}) {
 						oldBufItem := bufItem
 						bufItem = bufferPool.Get().(*bufferItem)
@@ -373,8 +373,9 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 					b.setBatch(hashes, index)
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					for i := 0; i < index; i++ {
-						buf := b.writeBuffer[hashes[i]%dedupCacheSize].Load().(*bufferItem)
-						b.writeBuffer[hashes[i]%dedupCacheSize].Store(nilBuffer)
+						bufferIndex := hashes[i] % dedupCacheSize
+						buf := b.writeBuffer[bufferIndex].Load().(*bufferItem)
+						b.writeBuffer[bufferIndex].Store(nilBuffer)
 						bufferPool.Put(buf)
 					}
 					firstTimeTimestamp = 0
@@ -385,8 +386,9 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 					b.setBatch(hashes, index)
 					atomic.StoreUint64(&b.writeBufferSize, 0)
 					for i := 0; i < index; i++ {
-						buf := b.writeBuffer[hashes[i]%dedupCacheSize].Load().(*bufferItem)
-						b.writeBuffer[hashes[i]%dedupCacheSize].Store(nilBuffer)
+						bufferIndex := hashes[i] % dedupCacheSize
+						buf := b.writeBuffer[bufferIndex].Load().(*bufferItem)
+						b.writeBuffer[bufferIndex].Store(nilBuffer)
 						bufferPool.Put(buf)
 					}
 					firstTimeTimestamp = 0
@@ -590,16 +592,16 @@ func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
 	kvPtr := b.writeBuffer[h%uint64(len(b.writeBuffer))].Load()
 	if len(kvPtr.(*bufferItem).data) > 0 {
 		bi := kvPtr.(*bufferItem)
-		if bi.doLocked(func(data []byte) {
-			kv := bi.data
+		if bi.doLocked(func(buffer *bufferItem) {
+			kv := buffer.data
 			kvLenBuf := kv[0:4]
 			keyLen := (uint64(kvLenBuf[0]) << 8) | uint64(kvLenBuf[1])
-			if string(k) == string(kv[4:4+keyLen]) {
+			if keyLen == uint64(len(k)) && string(k) == string(kv[4:4+keyLen]) {
 				if returnDst {
 					dst = append(dst, kv[4+keyLen:]...)
 				}
 			}
-		}) {
+		}) && len(dst) > 0 {
 			return dst, true
 		}
 	}
@@ -699,9 +701,9 @@ type bufferItem struct {
 	locked atomic.Bool
 }
 
-func (item *bufferItem) doLocked(updateFunc func(data []byte)) bool {
+func (item *bufferItem) doLocked(updateFunc func(item *bufferItem)) bool {
 	if item.locked.CompareAndSwap(false, true) {
-		updateFunc(item.data)
+		updateFunc(item)
 		item.locked.Store(false)
 		return true
 	}

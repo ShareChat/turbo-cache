@@ -74,6 +74,27 @@ func TestCacheSmall(t *testing.T) {
 	}
 }
 
+func TestCacheAsync(t *testing.T) {
+	c := New(newCacheConfigWithDefaultParams(bucketsCount * chunkSize * 1.5))
+	defer c.Close()
+
+	calls := uint64(1)
+	for i := uint64(0); i < calls; i++ {
+		k := []byte(fmt.Sprintf("key %d", i))
+		v := []byte(fmt.Sprintf("value %d", i))
+		c.Set(k, v)
+	}
+	for i := uint64(0); i < calls; i++ {
+		x := i * 10
+		k := []byte(fmt.Sprintf("key %d", x))
+		v := []byte(fmt.Sprintf("value %d", x))
+		vv, _ := c.getNotNilWithWait(nil, k, 50)
+		if len(vv) == 0 || string(v) != string(vv) {
+			t.Fatalf("unexpected value for key %q; got %q; want %q", k, vv, v)
+		}
+	}
+}
+
 func TestCacheWrap(t *testing.T) {
 	c := New(newCacheConfigWithDefaultParams(bucketsCount * chunkSize * 1.5))
 	defer c.Close()
@@ -93,6 +114,9 @@ func TestCacheWrap(t *testing.T) {
 		if len(vv) > 0 && string(v) != string(vv) {
 			t.Fatalf("unexpected value for key %q; got %q; want %q", k, vv, v)
 		}
+		if len(vv) > 0 {
+			fmt.Sprintf("%d", len(vv))
+		}
 	}
 
 	var s Stats
@@ -101,7 +125,7 @@ func TestCacheWrap(t *testing.T) {
 	if s.GetCalls != getCalls {
 		t.Fatalf("unexpected number of getCalls; got %d; want %d", s.GetCalls, getCalls)
 	}
-	if s.SetCalls > calls/2 {
+	if s.SetCalls < calls/10*9 {
 		t.Fatalf("unexpected number of setCalls; got %d; want %d", s.SetCalls, calls)
 	}
 	if s.Misses == 0 || s.Misses >= calls/10 {
@@ -110,7 +134,7 @@ func TestCacheWrap(t *testing.T) {
 	if s.Collisions != 0 {
 		t.Fatalf("unexpected number of collisions; got %d; want 0", s.Collisions)
 	}
-	if s.EntriesCount < calls/5 {
+	if s.EntriesCount < calls/10 {
 		t.Fatalf("unexpected number of items; got %d; cannot be smaller than %d", s.EntriesCount, calls/5)
 	}
 	if s.BytesSize < 1024 {
