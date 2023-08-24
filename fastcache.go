@@ -368,7 +368,7 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 					}
 				} else {
 					keyLen := (uint64(bufValue.data[0]) << 8) | uint64(bufValue.data[1])
-					if keyLen != uint64(len(i.K)) || string(i.K) != string(bufValue.data[4:4+keyLen]) {
+					if keyLen == uint64(len(i.K)) && string(i.K) == string(bufValue.data[4:4+keyLen]) {
 						atomic.AddUint64(&b.droppedWrites, 1)
 					}
 				}
