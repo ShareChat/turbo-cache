@@ -5,6 +5,7 @@ package turbocache
 
 import (
 	"fmt"
+	"github.com/ShareChat/turbo-cache/internal/primeNumber"
 	xxhash "github.com/cespare/xxhash/v2"
 	"math/rand"
 	"sync"
@@ -313,7 +314,7 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 	b.m = make(map[uint64]uint64)
 	b.Reset()
 	b.limiter = writeLimiter
-	b.writeBuffer = make([]atomic.Value, maxBatch*20)
+	b.writeBuffer = make([]atomic.Value, primeNumber.NextPrime(uint64(maxBatch*10)))
 	for i := range b.writeBuffer {
 		b.writeBuffer[i].Store(nilBuffer)
 	}
@@ -366,7 +367,7 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 						firstTimeTimestamp = time.Now().UnixMilli()
 					}
 				} else {
-					atomic.StoreUint64(&b.droppedWrites, 0)
+					atomic.AddUint64(&b.droppedWrites, 1)
 				}
 
 				if index >= maxBatch || (index > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval) {
@@ -491,7 +492,7 @@ func (b *bucket) set(kv []byte, h uint64, idx uint64, chunkIdx uint64, needClean
 		}
 		chunks[chunkIdx] = chunks[chunkIdx][:0]
 	}
-	//тут лок
+
 	chunk := chunks[chunkIdx]
 	if chunk == nil {
 		chunk = getChunk()
@@ -504,23 +505,6 @@ func (b *bucket) set(kv []byte, h uint64, idx uint64, chunkIdx uint64, needClean
 
 	return needClean, idxNew, chunkIdx
 }
-
-/*
-	func (b *bucket) setBatchUnlock(keys, values [][]byte, hashes []uint64, size int) (idxList []uint64, newChunks [][]byte, newIdx uint64, needClean bool) {
-		idxList = make([]uint64, size)
-		newChunks = make([][]byte, size)
-		idx := b.idx.Load()
-		chunkIdx := idx / chunkSize
-		for i := 0; i < size; i++ {
-			kvLenBuf, kvLen := b.kvLenBuf(keys[i], values[i])
-			if kvLen[i] > 0 && kvLen[i] < chunkSize {
-				needClean, idx, chunkIdx = b.set(keys[i], values[i], hashes[i], kvLenBuf, kvLen, idx, chunkIdx, needClean)
-			}
-		}
-
-		panic("23")
-	}
-*/
 
 func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 	if sync {
@@ -708,8 +692,9 @@ func NewConfigWithDroppingOnContention(maxBytes int, flushInterval int64, maxWri
 }
 
 type bufferItem struct {
-	data   []byte
-	locked atomic.Bool
+	data    []byte
+	locked  atomic.Bool
+	flushed atomic.Bool
 }
 
 func (item *bufferItem) doLocked(updateFunc func(item *bufferItem)) bool {
