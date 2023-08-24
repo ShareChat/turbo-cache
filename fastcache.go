@@ -441,11 +441,15 @@ func (b *bucket) cleanLocked(idx uint64) {
 func (b *bucket) UpdateStats(s *Stats, details bool) {
 	getCalls := atomic.LoadUint64(&b.getCalls)
 	s.GetCalls += getCalls
-	s.BucketGetCalls = append(s.BucketGetCalls, getCalls)
+	if details {
+		s.BucketGetCalls = append(s.BucketGetCalls, getCalls)
+	}
 
 	setCalls := atomic.LoadUint64(&b.setCalls)
 	s.SetCalls += setCalls
-	s.BucketsSetCalls = append(s.BucketsSetCalls, setCalls)
+	if details {
+		s.BucketsSetCalls = append(s.BucketsSetCalls, setCalls)
+	}
 	s.Misses += atomic.LoadUint64(&b.misses)
 	s.Collisions += atomic.LoadUint64(&b.collisions)
 	s.Corruptions += atomic.LoadUint64(&b.corruptions)
@@ -522,14 +526,21 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 	if sync {
 		b.setWithLock(k, v, h)
 	} else {
-		if b.dropWriting && len(b.setBuf) >= setBufSize {
-			atomic.AddUint64(&b.dropsInQueue, 1)
-			return
-		}
-		b.setBuf <- &insertValue{
+		setBuf := &insertValue{
 			K: k,
 			V: v,
 		}
+		if b.dropWriting {
+			select {
+			case b.setBuf <- setBuf:
+				return
+			default:
+				atomic.AddUint64(&b.dropsInQueue, 1)
+			}
+		} else {
+			b.setBuf <- setBuf
+		}
+
 	}
 }
 

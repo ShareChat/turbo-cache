@@ -85,7 +85,7 @@ func TestCacheAsync(t *testing.T) {
 		c.Set(k, v)
 	}
 	for i := uint64(0); i < calls; i++ {
-		x := i * 10
+		x := i
 		k := []byte(fmt.Sprintf("key %d", x))
 		v := []byte(fmt.Sprintf("value %d", x))
 		vv, _ := c.getNotNilWithWait(nil, k, 50)
@@ -113,9 +113,6 @@ func TestCacheWrap(t *testing.T) {
 		vv := c.Get(nil, k)
 		if len(vv) > 0 && string(v) != string(vv) {
 			t.Fatalf("unexpected value for key %q; got %q; want %q", k, vv, v)
-		}
-		if len(vv) > 0 {
-			fmt.Sprintf("%d", len(vv))
 		}
 	}
 
