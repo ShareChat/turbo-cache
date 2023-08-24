@@ -344,8 +344,8 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 			select {
 			case i := <-b.setBuf:
 				h := xxhash.Sum64(i.K)
-				bufValue := b.writeBuffer[h%dedupCacheSize].Load()
-				if len(bufValue.(*bufferItem).data) == 0 {
+				bufValue := b.writeBuffer[h%dedupCacheSize].Load().(*bufferItem)
+				if len(bufValue.data) == 0 {
 					lenBuf := b.kvLenBuf(i.K, i.V)
 					bufItem := bufferPool.Get().(*bufferItem)
 					for !bufItem.doLocked(func(buf *bufferItem) {
@@ -367,7 +367,10 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 						firstTimeTimestamp = time.Now().UnixMilli()
 					}
 				} else {
-					atomic.AddUint64(&b.droppedWrites, 1)
+					keyLen := (uint64(bufValue.data[0]) << 8) | uint64(bufValue.data[1])
+					if keyLen == uint64(len(i.K)) && string(i.K) == string(bufValue.data[4:4+keyLen]) {
+						atomic.AddUint64(&b.droppedWrites, 1)
+					}
 				}
 
 				if index >= maxBatch || (index > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval) {
