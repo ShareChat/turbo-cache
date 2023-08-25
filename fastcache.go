@@ -314,7 +314,7 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 	b.m = make(map[uint64]uint64)
 	b.Reset()
 	b.limiter = writeLimiter
-	b.writeBuffer = make([]atomic.Value, primeNumber.NextPrime(uint64(maxBatch*10)))
+	b.writeBuffer = make([]atomic.Value, primeNumber.NextPrime(uint64(maxBatch*100)))
 	for i := range b.writeBuffer {
 		b.writeBuffer[i].Store(nilBuffer)
 	}
