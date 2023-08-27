@@ -74,6 +74,41 @@ func TestCacheSmall(t *testing.T) {
 	}
 }
 
+func TestCacheAsyncSmallBatch(t *testing.T) {
+	c := New(NewConfigWithDroppingOnContention(bucketsCount*chunkSize*1.5, defaultFlushInterval, 3, 100000))
+	defer c.Close()
+
+	calls := uint64(1000)
+	missed := uint64(0)
+	for i := uint64(0); i < calls; i++ {
+		k := []byte(fmt.Sprintf("key %d", i))
+		v := []byte(fmt.Sprintf("value %d", i))
+		c.Set(k, v)
+	}
+	for i := uint64(0); i < calls; i++ {
+		x := i
+		k := []byte(fmt.Sprintf("key %d", x))
+		v := []byte(fmt.Sprintf("value %d", x))
+		vv, _ := c.getNotNilWithWait(nil, k, defaultFlushInterval*2)
+		if len(vv) == 0 {
+			missed++
+		}
+		if len(vv) > 0 && string(v) != string(vv) {
+			t.Fatalf("unexpected value; got %s; want  %s; key: %s", string(vv), string(v), k)
+		}
+	}
+
+	if missed > calls/10*3 {
+		t.Fatalf("unexpected missed getCalls; got %d; want > %d", missed, calls/10*2)
+	}
+
+	var s Stats
+	c.UpdateStats(&s, true)
+	if s.DroppedWrites > calls/10 {
+		t.Fatalf("unexpected number of setCalls; got %d; want > %d", s.DroppedWrites, calls/10)
+	}
+}
+
 func TestCacheAsync(t *testing.T) {
 	c := New(NewConfigWithDroppingOnContention(bucketsCount*chunkSize*1.5, defaultFlushInterval, 256, 100000))
 	defer c.Close()
@@ -89,9 +124,12 @@ func TestCacheAsync(t *testing.T) {
 		x := i
 		k := []byte(fmt.Sprintf("key %d", x))
 		v := []byte(fmt.Sprintf("value %d", x))
-		vv, _ := c.getNotNilWithWait(nil, k, 5)
-		if len(vv) == 0 || string(v) != string(vv) {
+		vv, _ := c.getNotNilWithWait(nil, k, defaultFlushInterval*2)
+		if len(vv) == 0 {
 			missed++
+		}
+		if len(vv) > 0 && string(v) != string(vv) {
+			t.Fatalf("unexpected value; got %s; want  %s; key: %s", string(vv), string(v), k)
 		}
 	}
 
@@ -108,6 +146,7 @@ func TestCacheAsync(t *testing.T) {
 
 func TestCacheWrap(t *testing.T) {
 	c := New(newCacheConfigWithDefaultParams(bucketsCount * chunkSize * 1.5))
+	notNullCount := 0
 	defer c.Close()
 
 	calls := uint64(5e6)
@@ -124,6 +163,9 @@ func TestCacheWrap(t *testing.T) {
 		vv := c.Get(nil, k)
 		if len(vv) > 0 && string(v) != string(vv) {
 			t.Fatalf("unexpected value for key %q; got %q; want %q", k, vv, v)
+		}
+		if len(vv) > 0 {
+			notNullCount++
 		}
 	}
 
