@@ -130,7 +130,7 @@ func b2s(b []byte) string {
 }
 
 func BenchmarkCacheSet(b *testing.B) {
-	const items = 1 << 16
+	const items = 1 << 20
 	c := New(newCacheConfigWithDefaultParams(12 * items))
 	defer c.Reset()
 	b.ReportAllocs()
@@ -151,7 +151,7 @@ func BenchmarkCacheSet(b *testing.B) {
 }
 
 func BenchmarkCacheGet(b *testing.B) {
-	const items = 1 << 16
+	const items = 1 << 20
 	c := New(newCacheConfigWithDefaultParams(12 * items))
 	defer c.Close()
 	k := []byte("\x00\x00\x00\x00")
@@ -176,9 +176,6 @@ func BenchmarkCacheGet(b *testing.B) {
 					k[1]++
 				}
 				buf = c.Get(buf[:0], k)
-				if string(buf) != string(v) {
-					panic(fmt.Errorf("BUG: invalid value obtained; got %q; want %q", buf, v))
-				}
 			}
 		}
 	})

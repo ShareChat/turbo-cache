@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const setBufSize = 1 * 1024
+const setBufSize = 512
 const defaultMaxWriteSizeBatch = 250
 const defaultFlushIntervalMillis = 5
 
@@ -187,7 +187,7 @@ func (c *Cache) Set(k, v []byte) {
 func (c *Cache) setSync(k, v []byte) {
 	h := xxhash.Sum64(k)
 	idx := h % bucketsCount
-	c.buckets[idx].setWithLock(k, v, h)
+	c.buckets[idx].Set(k, v, h, true)
 }
 
 // Get appends value by the key k to dst and returns the result.

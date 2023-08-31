@@ -42,26 +42,30 @@ func (c *Cache) SetBig(k, v []byte) {
 	valueHash := xxhash.Sum64(v)
 
 	// Split v into chunks with up to 64Kb each.
-	subkey := getSubkeyBuf()
-	var i uint64
-	for len(v) > 0 {
-		subkey.B = marshalUint64(subkey.B[:0], valueHash)
-		subkey.B = marshalUint64(subkey.B, uint64(i))
-		i++
-		subvalueLen := maxSubvalueLen
-		if len(v) < subvalueLen {
-			subvalueLen = len(v)
+	subKeyCount := len(v)/maxSubvalueLen + 2
+	uint64Size := 8
+	subkeys := make([]byte, 0, subKeyCount*uint64Size*2)
+	//var i uint64
+	startValueIndex := 0
+	endValueIndex := 0
+	startSubkeyIndex := 0
+	for i := 0; i <= len(v)/maxSubvalueLen; i++ {
+		startValueIndex = i * maxSubvalueLen
+		endValueIndex = (i + 1) * maxSubvalueLen
+		if endValueIndex > len(v) {
+			endValueIndex = len(v)
 		}
-		subvalue := v[:subvalueLen]
-		v = v[subvalueLen:]
-		c.setSync(subkey.B, subvalue)
+		subkeys = marshalUint64(subkeys, valueHash)
+		subkeys = marshalUint64(subkeys, uint64(i))
+		bytes := subkeys[startSubkeyIndex:]
+		startSubkeyIndex = len(subkeys)
+		c.Set(bytes, v[startValueIndex:endValueIndex])
 	}
-
 	// Write metavalue, which consists of valueHash and valueLen.
-	subkey.B = marshalUint64(subkey.B[:0], valueHash)
-	subkey.B = marshalUint64(subkey.B, uint64(valueLen))
-	c.setSync(k, subkey.B)
-	putSubkeyBuf(subkey)
+	startSubkeyIndex = len(subkeys)
+	subkeys = marshalUint64(subkeys, valueHash)
+	subkeys = marshalUint64(subkeys, uint64(valueLen))
+	c.Set(k, subkeys[startSubkeyIndex:])
 }
 
 // GetBig searches for the value for the given k, appends it to dst
@@ -132,9 +136,6 @@ func (c *Cache) GetBig(dst, k []byte) (r []byte) {
 
 func getSubkeyBuf() *bytesBuf {
 	v := subkeyPool.Get()
-	if v == nil {
-		return &bytesBuf{}
-	}
 	return v.(*bytesBuf)
 }
 
@@ -143,7 +144,9 @@ func putSubkeyBuf(bb *bytesBuf) {
 	subkeyPool.Put(bb)
 }
 
-var subkeyPool sync.Pool
+var subkeyPool = sync.Pool{New: func() any {
+	return &bytesBuf{}
+}}
 
 type bytesBuf struct {
 	B []byte

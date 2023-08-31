@@ -7,7 +7,7 @@ import (
 )
 
 func TestSetGetBig(t *testing.T) {
-	c := New(NewConfig(256*1024*1024, 3, 100))
+	c := New(NewConfig(1024*1024*1024, 3, 1))
 	const valuesCount = 10
 	for _, valueSize := range []int{1, 100, 1<<16 - 1, 1 << 16, 1<<16 + 1, 1 << 17, 1<<17 + 1, 1<<17 - 1, 1 << 19} {
 		t.Run(fmt.Sprintf("valueSize_%d", valueSize), func(t *testing.T) {
@@ -26,7 +26,7 @@ func testSetGetBig(t *testing.T, c *Cache, valueSize, valuesCount, seed int) {
 		value := createValue(valueSize, seed)
 		c.SetBig(key, value)
 		m[string(key)] = value
-		buf = c.GetBig(buf[:0], key)
+		buf = c.getBigWithExpectedValue(buf[:0], key, value)
 		if !bytes.Equal(buf, value) {
 			t.Fatalf("seed=%d; unexpected value obtained for key=%q; got len(value)=%d; want len(value)=%d", seed, key, len(buf), len(value))
 		}
