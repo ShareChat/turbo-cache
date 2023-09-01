@@ -618,7 +618,6 @@ func (b *bucket) flushToCache(itemCount int) {
 			writeBufIndex++
 			currentChunkIndex = kvEnd
 			idx = idxNew
-			chunkIdx = chunkIdxNew
 		}
 	}
 
