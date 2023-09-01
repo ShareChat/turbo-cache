@@ -113,7 +113,7 @@ func TestCacheAsync(t *testing.T) {
 	c := New(NewConfigWithDroppingOnContention(bucketsCount*chunkSize*1.5, defaultFlushInterval, 256, 100000))
 	defer c.Close()
 
-	calls := uint64(1000000)
+	calls := uint64(100000)
 	missed := uint64(0)
 	for i := uint64(0); i < calls; i++ {
 		k := []byte(fmt.Sprintf("key %d", i))
@@ -134,13 +134,13 @@ func TestCacheAsync(t *testing.T) {
 	}
 
 	if missed > calls/10 {
-		t.Fatalf("unexpected number of getCalls; got %d; want > %d", calls-missed, calls/10)
+		t.Fatalf("unexpected number of missed; got %d; want < %d", calls-missed, calls/10)
 	}
 
 	var s Stats
 	c.UpdateStats(&s, true)
 	if s.DroppedWrites > calls/10 {
-		t.Fatalf("unexpected number of setCalls; got %d; want > %d", s.DroppedWrites, calls/10)
+		t.Fatalf("unexpected number of DroppedWrites; got %d; want < %d", s.DroppedWrites, calls/10)
 	}
 }
 

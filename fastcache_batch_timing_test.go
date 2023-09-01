@@ -8,7 +8,7 @@ import (
 func BenchmarkBatchSet(b *testing.B) {
 	const items = 1 << 12
 	const buffSize = 1024
-	c := New(newCacheConfigWithDefaultParams(12 * items))
+	c := New(newCacheConfigWithDefaultParams(12000 * items))
 	defer c.Reset()
 	k := []byte("\x00\x00\x00\x00")
 	v := []byte("xyza")
@@ -20,6 +20,7 @@ func BenchmarkBatchSet(b *testing.B) {
 		buffer[i].kv = append(buffer[i].kv, k...)
 		buffer[i].kv = append(buffer[i].kv, v...)
 		buffer[i].h = xxhash.Sum64(k)
+		buffer[i].chunk = uint64(i % len(c.buckets[0].chunks))
 	}
 	b.ReportAllocs()
 	//b.SetBytes(items)
@@ -27,7 +28,7 @@ func BenchmarkBatchSet(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			for i := 0; i < items; i++ {
-				c.buckets[i%bucketsCount].setBatchInternal(buffer)
+				c.buckets[i%bucketsCount].setBatchInternal(buffer, true, 1, 1)
 
 				buffer[i%buffSize].kv[i%(len(buffer[i%buffSize].kv)-4)+4]++
 			}

@@ -571,6 +571,12 @@ func (b *bucket) flushToCache(itemCount int) {
 	atomic.AddUint64(&b.setCalls, uint64(itemCount))
 	writeBufSize := len(b.writeCache)
 
+	needClean := false
+	idx := b.idx.Load()
+	var idxNew uint64
+	gen := b.gen
+	chunkIdx := idx / chunkSize
+	chunks := b.chunks
 	writeBufIndex := 0
 	for i := 0; i < writeBufSize; i++ {
 		bufItem := b.writeCache[i].Load().(*bufferItem)
@@ -582,30 +588,65 @@ func (b *bucket) flushToCache(itemCount int) {
 			} else {
 				kvEnd = uint64(len(bufItem.data))
 			}
-			b.flushBuffer[writeBufIndex].kv = bufItem.data[currentChunkIndex:kvEnd]
+			kv := bufItem.data[currentChunkIndex:kvEnd]
+			b.flushBuffer[writeBufIndex].kv = kv
 			b.flushBuffer[writeBufIndex].h = bufItem.hash[j]
+			idxNew = idx + uint64(len(kv))
+			chunkIdxNew := idxNew / chunkSize
+			if chunkIdxNew > chunkIdx {
+				if chunkIdxNew >= uint64(len(chunks)) {
+					idx = 0
+					idxNew = uint64(len(kv))
+					chunkIdx = 0
+					gen++
+					if gen&((1<<genSizeBits)-1) == 0 {
+						gen++
+					}
+					needClean = true
+				} else {
+					idx = chunkIdxNew * chunkSize
+					idxNew = idx + uint64(len(kv))
+					chunkIdx = chunkIdxNew
+				}
+				b.flushBuffer[writeBufIndex].cleanChunk = true
+			} else {
+				b.flushBuffer[writeBufIndex].cleanChunk = false
+			}
+			b.flushBuffer[writeBufIndex].idx = idx
+			b.flushBuffer[writeBufIndex].gen = gen
+			b.flushBuffer[writeBufIndex].chunk = chunkIdx
 			writeBufIndex++
 			currentChunkIndex = kvEnd
+			idx = idxNew
+			chunkIdx = chunkIdxNew
 		}
 	}
 
-	b.setBatchInternal(b.flushBuffer[:itemCount])
+	b.setBatchInternal(b.flushBuffer[:itemCount], needClean, idxNew, gen)
 }
 
-func (b *bucket) setBatchInternal(flushBuffer []flushStruct) {
-	needClean := false
-	idx := b.idx.Load()
-	chunkIdx := idx / chunkSize
-
+func (b *bucket) setBatchInternal(flushBuffer []flushStruct, needClean bool, idxNew uint64, genNew uint64) {
 	b.mu.Lock()
 	for i := 0; i < len(flushBuffer); i++ {
-		needClean, idx, chunkIdx = b.set(flushBuffer[i].kv, flushBuffer[i].h, idx, chunkIdx, needClean)
-	}
+		flushBuf := flushBuffer[i]
+		chunk := b.chunks[flushBuf.chunk]
+		if flushBuf.cleanChunk {
+			chunk = chunk[:0]
+		}
 
-	if needClean {
-		b.cleanLocked(idx)
+		if chunk == nil {
+			chunk = getChunk()
+			chunk = chunk[:0]
+		}
+
+		b.chunks[flushBuf.chunk] = append(chunk, flushBuf.kv...)
+		b.m[flushBuf.h] = flushBuf.idx | (flushBuf.gen << bucketSizeBits)
 	}
-	b.idx.Store(idx)
+	b.idx.Store(idxNew)
+	b.gen = genNew
+	if needClean {
+		b.cleanLocked(idxNew)
+	}
 	b.mu.Unlock()
 }
 
@@ -775,6 +816,10 @@ func (item *bufferItem) doLockedEdit(updateFunc func(item *bufferItem)) {
 }
 
 type flushStruct struct {
-	kv []byte
-	h  uint64
+	kv         []byte
+	h          uint64
+	chunk      uint64
+	idx        uint64
+	gen        uint64
+	cleanChunk bool
 }
