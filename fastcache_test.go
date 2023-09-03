@@ -330,13 +330,15 @@ func TestAsyncInsertToCache(t *testing.T) {
 			bucket := &c.buckets[0]
 			for i := 0; i < itemsCount; i++ {
 				key := []byte(fmt.Sprintf("key %d", i))
+				hash := xxhash.Sum64(key)
 				expectedValue := []byte(fmt.Sprintf("value %d", i))
 				bucket.onNewItem(&insertValue{
 					K: key,
 					V: expectedValue,
+					h: hash,
 				}, 1, 1)
 
-				actualValue, found := bucket.Get(nil, key, xxhash.Sum64(key), true)
+				actualValue, found := bucket.Get(nil, key, hash, true)
 
 				if !found {
 					t.Fatalf("not found wanted key %s", string(key))

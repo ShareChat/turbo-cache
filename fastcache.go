@@ -352,7 +352,7 @@ func (b *bucket) onFlushTick(flushInterval int64) {
 }
 
 func (b *bucket) onNewItem(i *insertValue, maxBatch int, flushInterval int64) {
-	h := xxhash.Sum64(i.K)
+	h := i.h
 	bufValue := b.writeCache[h%uint64(len(b.writeCache))].Load().(*bufferItem)
 	duplicated := false
 	droppedWriting := false
@@ -522,6 +522,7 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 		setBuf := &insertValue{
 			K: k,
 			V: v,
+			h: h,
 		}
 		if b.dropWriting {
 			select {
@@ -742,6 +743,7 @@ func (b *bucket) Del(h uint64) {
 
 type insertValue struct {
 	K, V []byte
+	h    uint64
 }
 
 type Config struct {
