@@ -297,6 +297,7 @@ type bucket struct {
 	droppedWrites   uint64
 	duplicatedCount uint64
 	limiter         *limiter
+	latestTimestamp int64
 }
 
 func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWrite bool, writeLimiter *limiter) {
@@ -328,63 +329,12 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 	go func() {
 		b.randomDelay(flushInterval)
 		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
-		var firstTimeTimestamp int64
-		writeBufSize := uint64(len(b.writeCache))
 		for {
 			select {
 			case i := <-b.setBuf:
-				h := xxhash.Sum64(i.K)
-				bufValue := b.writeCache[h%writeBufSize].Load().(*bufferItem)
-				duplicated := false
-				droppedWriting := false
-				for j := range bufValue.hash {
-					if bufValue.hash[j] == h {
-						duplicated = true
-					}
-				}
-				if !duplicated {
-					lenBuf := kvLenBuf(i.K, i.V)
-					currentIndex := len(bufValue.data)
-					if currentIndex+len(lenBuf)+len(i.K)+len(i.V) > chunkSize {
-						droppedWriting = true
-					}
-					if !droppedWriting {
-						bufValue.doLockedEdit(func(item *bufferItem) {
-							item.data = append(item.data, lenBuf[:]...)
-							item.data = append(item.data, i.K...)
-							item.data = append(item.data, i.V...)
-							item.hash = append(item.hash, h)
-							item.index = append(item.index, uint64(currentIndex))
-						})
-						b.writeCache[h%writeBufSize].Store(bufValue)
-						atomic.AddUint64(&b.writeBufferSize, 1)
-						if firstTimeTimestamp == 0 {
-							firstTimeTimestamp = time.Now().UnixMilli()
-						}
-					}
-
-				}
-				if duplicated {
-					atomic.AddUint64(&b.duplicatedCount, 1)
-				}
-
-				if droppedWriting {
-					atomic.AddUint64(&b.droppedWrites, 1)
-				}
-
-				if b.writeBufferSize >= uint64(maxBatch) || (b.writeBufferSize > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval) {
-					b.flushToCache()
-					atomic.StoreUint64(&b.writeBufferSize, 0)
-					b.resetWriteBuffer(writeBufSize)
-					firstTimeTimestamp = 0
-				}
+				b.onNewItem(i, maxBatch, flushInterval)
 			case _ = <-t:
-				if b.writeBufferSize > 0 && time.Since(time.UnixMilli(firstTimeTimestamp)).Milliseconds() >= flushInterval {
-					b.flushToCache()
-					atomic.StoreUint64(&b.writeBufferSize, 0)
-					b.resetWriteBuffer(writeBufSize)
-					firstTimeTimestamp = 0
-				}
+				b.onFlushTick(flushInterval)
 			case <-b.stopWriting:
 				return
 			}
@@ -392,8 +342,65 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 	}()
 }
 
-func (b *bucket) resetWriteBuffer(writeBufSize uint64) {
-	for i := uint64(0); i < writeBufSize; i++ {
+func (b *bucket) onFlushTick(flushInterval int64) {
+	if b.writeBufferSize > 0 && time.Since(time.UnixMilli(b.latestTimestamp)).Milliseconds() >= flushInterval {
+		b.flushToCache()
+		atomic.StoreUint64(&b.writeBufferSize, 0)
+		b.resetWriteBuffer()
+		b.latestTimestamp = 0
+	}
+}
+
+func (b *bucket) onNewItem(i *insertValue, maxBatch int, flushInterval int64) {
+	h := xxhash.Sum64(i.K)
+	bufValue := b.writeCache[h%uint64(len(b.writeCache))].Load().(*bufferItem)
+	duplicated := false
+	droppedWriting := false
+	for j := range bufValue.hash {
+		if bufValue.hash[j] == h {
+			duplicated = true
+		}
+	}
+	if !duplicated {
+		lenBuf := kvLenBuf(i.K, i.V)
+		currentIndex := len(bufValue.data)
+		if currentIndex+len(lenBuf)+len(i.K)+len(i.V) > chunkSize {
+			droppedWriting = true
+		}
+		if !droppedWriting {
+			bufValue.doLockedEdit(func(item *bufferItem) {
+				item.data = append(item.data, lenBuf[:]...)
+				item.data = append(item.data, i.K...)
+				item.data = append(item.data, i.V...)
+				item.hash = append(item.hash, h)
+				item.index = append(item.index, uint64(currentIndex))
+			})
+			b.writeCache[h%uint64(len(b.writeCache))].Store(bufValue)
+			atomic.AddUint64(&b.writeBufferSize, 1)
+			if b.latestTimestamp == 0 {
+				b.latestTimestamp = time.Now().UnixMilli()
+			}
+		}
+
+	}
+	if duplicated {
+		atomic.AddUint64(&b.duplicatedCount, 1)
+	}
+
+	if droppedWriting {
+		atomic.AddUint64(&b.droppedWrites, 1)
+	}
+
+	if b.writeBufferSize >= uint64(maxBatch) || (b.writeBufferSize > 0 && time.Since(time.UnixMilli(b.latestTimestamp)).Milliseconds() >= flushInterval) {
+		b.flushToCache()
+		atomic.StoreUint64(&b.writeBufferSize, 0)
+		b.resetWriteBuffer()
+		b.latestTimestamp = 0
+	}
+}
+
+func (b *bucket) resetWriteBuffer() {
+	for i := 0; i < len(b.writeCache); i++ {
 		bufItem := b.writeCache[i].Load().(*bufferItem)
 		bufItem.doLockedEdit(func(item *bufferItem) {
 			item.data = item.data[:0]

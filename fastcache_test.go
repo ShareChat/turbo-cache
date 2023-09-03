@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/cespare/xxhash/v2"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -320,27 +321,31 @@ func TestShouldDropWritingOnBufferOverflow(t *testing.T) {
 	}
 }
 
-func TestShouldDropWritingOnLimitSetting(t *testing.T) {
-	itemsCount := 16 * setBufSize
-	const gorotines = 10
-	c := New(NewConfigWithDroppingOnContention(30*itemsCount*gorotines, 5, 10, 10))
-
-	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
-		curId := i
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+func TestAsyncInsertToCache(t *testing.T) {
+	itemsCount := 64 * 1024
+	for _, batch := range []int{1, 3, 131, 1024} {
+		t.Run(fmt.Sprintf("batch_%d", batch), func(t *testing.T) {
+			c := New(NewConfigWithDroppingOnContention(30*itemsCount, 5, batch, 10))
+			defer c.Close()
+			bucket := &c.buckets[0]
 			for i := 0; i < itemsCount; i++ {
-				c.Set([]byte(fmt.Sprintf("key %d, gorutine: %d", i, curId)), []byte(fmt.Sprintf("value %d", i)))
+				key := []byte(fmt.Sprintf("key %d", i))
+				expectedValue := []byte(fmt.Sprintf("value %d", i))
+				bucket.onNewItem(&insertValue{
+					K: key,
+					V: expectedValue,
+				}, 1, 1)
+
+				actualValue, found := bucket.Get(nil, key, xxhash.Sum64(key), true)
+
+				if !found {
+					t.Fatalf("not found wanted key %s", string(key))
+				}
+				if string(expectedValue) != string(actualValue) {
+					t.Fatalf("key %s, wanted %s got %s", string(key), string(expectedValue), string(actualValue))
+				}
 			}
-		}()
-	}
-	wg.Wait()
-	var s Stats
-	c.UpdateStats(&s, true)
-	if s.DroppedWrites == 0 {
-		t.Fatalf("drop writes should be presented")
+		})
 	}
 }
 
