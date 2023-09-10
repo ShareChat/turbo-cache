@@ -381,6 +381,43 @@ func TestAsyncInsertToCache2(t *testing.T) {
 	}
 }
 
+func TestAsyncInsertToCacheConcurrentRad(t *testing.T) {
+	itemsCount := 64 * 1024
+	for _, batch := range []int{1, 3, 131, 1024} {
+		t.Run(fmt.Sprintf("batch_%d", batch), func(t *testing.T) {
+			c := New(NewConfigWithDroppingOnContention(30*itemsCount, 5, batch, 10))
+			defer c.Close()
+
+			ch := make(chan []byte, 128)
+
+			bucket := &c.buckets[0]
+			go func() {
+				for i := 0; i < itemsCount; i++ {
+					key := []byte(fmt.Sprintf("key %d", i))
+					bucket.onNewItemV2(&insertValue{
+						K: key,
+						V: key,
+						h: xxhash.Sum64(key),
+					}, 1, 1)
+
+					ch <- key
+				}
+				close(ch)
+			}()
+			for k := range ch {
+				actualValue, found := bucket.Get(nil, k, xxhash.Sum64(k), true)
+
+				if !found {
+					t.Fatalf("not found wanted key %s", string(k))
+				}
+				if string(k) != string(actualValue) {
+					t.Fatalf("key %s, wanted %s got %s", string(k), string(k), string(actualValue))
+				}
+			}
+		})
+	}
+}
+
 func TestCacheResetUpdateStatsSetConcurrent(t *testing.T) {
 	c := New(newCacheConfigWithDefaultParams(12334))
 
