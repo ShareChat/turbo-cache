@@ -156,7 +156,7 @@ func TestCacheWrap(t *testing.T) {
 		v := []byte(fmt.Sprintf("value %d", i))
 		c.Set(k, v)
 	}
-	c.waitForExpectedCacheSize(cacheDelay)
+	_ = c.waitForExpectedCacheSize(cacheDelay)
 	for i := uint64(0); i < calls/10; i++ {
 		x := i * 10
 		k := []byte(fmt.Sprintf("key %d", x))

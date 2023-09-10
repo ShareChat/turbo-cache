@@ -69,8 +69,7 @@ type Stats struct {
 	// Drops due to write limit
 	DroppedWrites uint64
 	//queue write
-	WriteQueueSize   uint64
-	OnFlightSetCalls uint64
+	WriteQueueSize uint64
 
 	// BigStats contains stats for GetBig/SetBig methods.
 	BigStats
@@ -134,8 +133,6 @@ type Cache struct {
 	bigStats BigStats
 
 	syncWrite bool
-
-	writeLimiter *limiter
 }
 
 // New returns new cache with the given maxBytes capacity in bytes.
@@ -157,10 +154,9 @@ func New(config *Config) *Cache {
 
 	var c Cache
 	c.syncWrite = config.syncWrite
-	c.writeLimiter = newLimiter(int32(config.concurrentWriteLimit))
 	maxBucketBytes := uint64((config.maxBytes + bucketsCount - 1) / bucketsCount)
 	for i := range c.buckets[:] {
-		c.buckets[i].Init(maxBucketBytes, config.flushIntervalMillis, config.maxWriteBatch, config.syncWrite, c.writeLimiter)
+		c.buckets[i].Init(maxBucketBytes, config.flushIntervalMillis, config.maxWriteBatch, config.syncWrite)
 		c.buckets[i].dropWriting = config.dropWriteOnHighContention
 	}
 	return &c
@@ -264,7 +260,6 @@ func (c *Cache) UpdateStats(s *Stats, details bool) {
 	s.InvalidMetavalueErrors += atomic.LoadUint64(&c.bigStats.InvalidMetavalueErrors)
 	s.InvalidValueLenErrors += atomic.LoadUint64(&c.bigStats.InvalidValueLenErrors)
 	s.InvalidValueHashErrors += atomic.LoadUint64(&c.bigStats.InvalidValueHashErrors)
-	s.OnFlightSetCalls = uint64(c.writeLimiter.onFlight.Load())
 }
 
 type bucket struct {
@@ -298,11 +293,10 @@ type bucket struct {
 	dropsInQueue    uint64
 	droppedWrites   uint64
 	duplicatedCount uint64
-	limiter         *limiter
 	latestTimestamp int64
 }
 
-func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWrite bool, writeLimiter *limiter) {
+func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWrite bool) {
 
 	if maxBytes == 0 {
 		panic(fmt.Errorf("maxBytes cannot be zero"))
@@ -314,7 +308,6 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 	b.chunks = make([][]byte, maxChunks)
 	b.m = make(map[uint64]uint64)
 	b.Reset()
-	b.limiter = writeLimiter
 	b.writeCache = make([]atomic.Value, primeNumber.NextPrime(uint64(maxBatch*2)))
 	for i := range b.writeCache {
 		b.writeCache[i].Store(makeNewBufferItem(4096))
