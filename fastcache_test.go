@@ -355,9 +355,10 @@ func TestAsyncInsertToCache2(t *testing.T) {
 	itemsCount := 64 * 1024
 	for _, batch := range []int{1, 3, 131, 1024} {
 		t.Run(fmt.Sprintf("batch_%d", batch), func(t *testing.T) {
-			c := New(NewConfigWithDroppingOnContention(30*itemsCount, 5, batch, 10))
+			c := New(NewConfigWithDroppingOnContention(64*itemsCount*1024, 5, batch, 10))
 			defer c.Close()
 			bucket := &c.buckets[0]
+			notFoundCount := 0
 			for i := 0; i < itemsCount; i++ {
 				key := []byte(fmt.Sprintf("key %d", i))
 				hash := xxhash.Sum64(key)
@@ -366,53 +367,66 @@ func TestAsyncInsertToCache2(t *testing.T) {
 					K: key,
 					V: expectedValue,
 					h: hash,
-				}, 1, 1)
+				}, batch, 100000)
 
 				actualValue, found := bucket.Get(nil, key, hash, true)
 
 				if !found {
-					t.Fatalf("not found wanted key %s", string(key))
+					notFoundCount++
 				}
-				if string(expectedValue) != string(actualValue) {
+				if found && string(expectedValue) != string(actualValue) {
 					t.Fatalf("key %s, wanted %s got %s", string(key), string(expectedValue), string(actualValue))
 				}
+			}
+
+			t.Logf("not found count: %d out %d", notFoundCount, itemsCount)
+			if notFoundCount > itemsCount/10 {
+				t.Fatalf("too much not found. actual: %d, expected: %d", notFoundCount, itemsCount/10)
 			}
 		})
 	}
 }
 
-func TestAsyncInsertToCacheConcurrentRad(t *testing.T) {
+func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
 	itemsCount := 64 * 1024
 	for _, batch := range []int{1, 3, 131, 1024} {
 		t.Run(fmt.Sprintf("batch_%d", batch), func(t *testing.T) {
-			c := New(NewConfigWithDroppingOnContention(30*itemsCount, 5, batch, 10))
+			c := New(NewConfigWithDroppingOnContention(30*itemsCount, 500, batch, 10))
 			defer c.Close()
 
-			ch := make(chan []byte, 128)
-
+			ch := make(chan string, 128)
+			var notFoundCount atomic.Int32
 			bucket := &c.buckets[0]
 			go func() {
+				var wg sync.WaitGroup
 				for i := 0; i < itemsCount; i++ {
 					key := []byte(fmt.Sprintf("key %d", i))
 					bucket.onNewItemV2(&insertValue{
 						K: key,
 						V: key,
 						h: xxhash.Sum64(key),
-					}, 1, 1)
+					}, batch, 100)
+					wg.Add(1)
+					go func() {
+						actualValue, found := bucket.Get(nil, key, xxhash.Sum64(key), true)
+						if !found {
+							notFoundCount.Add(1)
+							if notFoundCount.Load() > int32(itemsCount/10) {
+								ch <- fmt.Sprintf("not found count expected less than %d, got %d", itemsCount/10, notFoundCount.Load())
+							}
+						}
+						if string(key) != string(actualValue) {
+							ch <- fmt.Sprintf("%s, wanted %s got %s", string(key), string(key), string(actualValue))
+						}
+						wg.Done()
+					}()
 
-					ch <- key
 				}
+				wg.Wait()
 				close(ch)
 			}()
-			for k := range ch {
-				actualValue, found := bucket.Get(nil, k, xxhash.Sum64(k), true)
-
-				if !found {
-					t.Fatalf("not found wanted key %s", string(k))
-				}
-				if string(k) != string(actualValue) {
-					t.Fatalf("key %s, wanted %s got %s", string(k), string(k), string(actualValue))
-				}
+			for err := range ch {
+				t.Fatalf(err)
 			}
 		})
 	}

@@ -350,7 +350,7 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 			lockedRead: atomic.Bool{},
 		}
 	}
-	b.flusher.index = make([]flushChunkIndexItem, maxBatch)
+	b.flusher.index = make([]flushChunkIndexItem, primeNumber.NextPrime(uint64(maxBatch)))
 	go func() {
 		b.randomDelay(flushInterval)
 		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
@@ -380,7 +380,7 @@ func (b *bucket) onNewItemV2(i *insertValue, maxBatch int, flushInterval int64) 
 	f := b.flusher
 
 	duplicated := false
-	indexItem := f.index[i.h%uint64(len(f.index))]
+	indexItem := &f.index[i.h%uint64(len(f.index))]
 	for _, hv := range indexItem.h {
 		if hv == i.h {
 			duplicated = true
@@ -389,17 +389,12 @@ func (b *bucket) onNewItemV2(i *insertValue, maxBatch int, flushInterval int64) 
 		}
 	}
 	if !duplicated {
-		flushChunk := &f.chunks[f.currentFlushChunk]
 		kvLength := uint64(4) + uint64(len(i.K)) + uint64(len(i.V))
-		newIndex := flushChunk.size
-		if newIndex > chunkSize {
-			f.currentFlushChunk++
-			//handle out of range
-			flushChunk = &f.chunks[f.currentFlushChunk]
-			newIndex = uint64(4) + uint64(len(i.K)) + uint64(len(i.V))
-		}
 		idxNew, cleanChunk := f.getNewIndexes(kvLength)
-
+		if cleanChunk {
+			f.currentFlushChunk++
+		}
+		flushChunk := &f.chunks[f.currentFlushChunk]
 		lenBuf := kvLenBuf(i.K, i.V)
 		flushChunk.chunk = append(flushChunk.chunk, lenBuf[:]...)
 		flushChunk.chunk = append(flushChunk.chunk, i.K...)
@@ -418,7 +413,7 @@ func (b *bucket) onNewItemV2(i *insertValue, maxBatch int, flushInterval int64) 
 				break
 			}
 		}
-		flushChunk.size = newIndex
+		flushChunk.size += kvLength
 		f.idx = idxNew
 		f.count++
 		if b.latestTimestamp == 0 {
@@ -1031,7 +1026,7 @@ type flushChunk struct {
 }
 
 type flushChunkIndexItem struct {
-	flushChunk [5]int
-	h          [5]uint64
-	currentIdx [5]uint64
+	flushChunk [7]int
+	h          [7]uint64
+	currentIdx [7]uint64
 }
