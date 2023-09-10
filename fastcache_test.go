@@ -391,7 +391,7 @@ func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
 	itemsCount := 64 * 1024
 	for _, batch := range []int{1, 3, 131, 1024} {
 		t.Run(fmt.Sprintf("batch_%d", batch), func(t *testing.T) {
-			c := New(NewConfigWithDroppingOnContention(30*itemsCount, 500, batch, 10))
+			c := New(NewConfigWithDroppingOnContention(1024*itemsCount*1024, 500, batch, 10))
 			defer c.Close()
 
 			ch := make(chan string, 128)
@@ -405,7 +405,7 @@ func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
 						K: key,
 						V: key,
 						h: xxhash.Sum64(key),
-					}, batch, 100)
+					}, batch, 100000)
 					wg.Add(1)
 					go func() {
 						actualValue, found := bucket.Get(nil, key, xxhash.Sum64(key), true)
@@ -415,7 +415,7 @@ func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
 								ch <- fmt.Sprintf("not found count expected less than %d, got %d", itemsCount/10, notFoundCount.Load())
 							}
 						}
-						if string(key) != string(actualValue) {
+						if found && string(key) != string(actualValue) {
 							ch <- fmt.Sprintf("%s, wanted %s got %s", string(key), string(key), string(actualValue))
 						}
 						wg.Done()

@@ -6,6 +6,7 @@ package turbocache
 import (
 	"fmt"
 	"github.com/ShareChat/turbo-cache/internal/primeNumber"
+	"github.com/ShareChat/turbo-cache/spinlock"
 	xxhash "github.com/cespare/xxhash/v2"
 	"math/rand"
 	"sync"
@@ -346,11 +347,10 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 			gen:        make([]uint64, 0, 128),
 			size:       0,
 			cleanChunk: false,
-			flushed:    atomic.Bool{},
-			lockedRead: atomic.Bool{},
 		}
 	}
-	b.flusher.index = make([]flushChunkIndexItem, primeNumber.NextPrime(uint64(maxBatch)))
+	index := make([]flushChunkIndexItem, primeNumber.NextPrime(uint64(maxBatch)))
+	b.flusher.index.Store(index)
 	go func() {
 		b.randomDelay(flushInterval)
 		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
@@ -380,7 +380,8 @@ func (b *bucket) onNewItemV2(i *insertValue, maxBatch int, flushInterval int64) 
 	f := b.flusher
 
 	duplicated := false
-	indexItem := &f.index[i.h%uint64(len(f.index))]
+	index := b.flusher.index.Load().([]flushChunkIndexItem)
+	indexItem := &index[i.h%uint64(len(index))]
 	for _, hv := range indexItem.h {
 		if hv == i.h {
 			duplicated = true
@@ -412,6 +413,7 @@ func (b *bucket) onNewItemV2(i *insertValue, maxBatch int, flushInterval int64) 
 				indexItem.flushChunk[j] = f.currentFlushChunk
 				break
 			}
+			b.flusher.index.Store(index)
 		}
 		flushChunk.size += kvLength
 		f.idx = idxNew
@@ -424,6 +426,21 @@ func (b *bucket) onNewItemV2(i *insertValue, maxBatch int, flushInterval int64) 
 	if f.count >= maxBatch || (f.count > 0 && time.Since(time.UnixMilli(b.latestTimestamp)).Milliseconds() >= flushInterval) {
 		b.setBatchInternalMostOptimised(f.chunks, f.needClean, f.idx, f.gen)
 
+		f.flushed.Store(true)
+		f.spinlock.Lock()
+
+		for i := 0; i < len(index); i++ {
+			for j := range index[i].h {
+				if index[i].h[j] != 0 {
+					index[i].h[j] = 0
+					index[i].currentIdx[j] = 0
+					index[i].flushChunk[j] = 0
+				} else {
+					break
+				}
+			}
+		}
+		f.spinlock.Unlock()
 		for j := range f.chunks {
 			f.chunks[j].h = make([]uint64, 0, 128)
 			f.chunks[j].idx = make([]uint64, 0, 128)
@@ -432,17 +449,9 @@ func (b *bucket) onNewItemV2(i *insertValue, maxBatch int, flushInterval int64) 
 			f.chunks[j].cleanChunk = false
 			f.chunks[j].gen = make([]uint64, 0, 128)
 		}
-		for i := 0; i < len(f.index); i++ {
-			for j := range f.index[i].h {
-				if f.index[i].h[j] != 0 {
-					f.index[i].h[j] = 0
-					f.index[i].currentIdx[j] = 0
-					f.index[i].flushChunk[j] = 0
-				} else {
-					break
-				}
-			}
-		}
+
+		f.flushed.Store(false)
+
 		f.currentFlushChunk = 0
 		f.count = 0
 		b.latestTimestamp = 0
@@ -789,28 +798,37 @@ func (b *bucket) setBatchInternal(flushBuffer []flushStruct, needClean bool, idx
 func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
 	atomic.AddUint64(&b.getCalls, 1)
 	found := false
-
-	indexItem := b.flusher.index[h%uint64(len(b.flusher.index))]
-	for i := range indexItem.h {
-		if indexItem.h[i] == 0 {
-			break
-		} else if indexItem.h[i] == h {
-			chunkId := indexItem.flushChunk[i]
-			flushIdx := indexItem.currentIdx[i]
-			kvLenBuf := b.flusher.chunks[chunkId].chunk[flushIdx : flushIdx+4]
-			keyLen := (uint64(kvLenBuf[0]) << 8) | uint64(kvLenBuf[1])
-			if keyLen == uint64(len(k)) && string(k) == string(b.flusher.chunks[chunkId].chunk[flushIdx+4:flushIdx+4+keyLen]) {
-				if returnDst {
-					valLen := (uint64(kvLenBuf[2]) << 8) | uint64(kvLenBuf[3])
-					dst = append(dst, b.flusher.chunks[chunkId].chunk[flushIdx+4+keyLen:flushIdx+4+keyLen+valLen]...)
-					found = true
+	if !b.flusher.flushed.Load() {
+		index := b.flusher.index.Load().([]flushChunkIndexItem)
+		indexItem := (index)[h%uint64(len(index))]
+		for i := range indexItem.h {
+			if indexItem.h[i] == 0 {
+				break
+			} else if indexItem.h[i] == h {
+				if b.flusher.spinlock.TryRLock() {
+					index = b.flusher.index.Load().([]flushChunkIndexItem)
+					if indexItem.h[i] == h {
+						chunkId := indexItem.flushChunk[i]
+						flushIdx := indexItem.currentIdx[i]
+						kvLenBuf := b.flusher.chunks[chunkId].chunk[flushIdx : flushIdx+4]
+						keyLen := (uint64(kvLenBuf[0]) << 8) | uint64(kvLenBuf[1])
+						if keyLen == uint64(len(k)) && string(k) == string(b.flusher.chunks[chunkId].chunk[flushIdx+4:flushIdx+4+keyLen]) {
+							if returnDst {
+								valLen := (uint64(kvLenBuf[2]) << 8) | uint64(kvLenBuf[3])
+								dst = append(dst, b.flusher.chunks[chunkId].chunk[flushIdx+4+keyLen:flushIdx+4+keyLen+valLen]...)
+								found = true
+							}
+						}
+					}
+					b.flusher.spinlock.RUnlock()
 				}
 			}
 		}
+		if found {
+			return dst, found
+		}
 	}
-	if found {
-		return dst, found
-	}
+
 	/*
 		bufItem := b.writeCache[h%uint64(len(b.writeCache))].Load().(*bufferItem)
 		if len(bufItem.hash) > 0 {
@@ -980,13 +998,15 @@ type flushStruct struct {
 type flusher struct {
 	count             int
 	chunks            []flushChunk
-	index             []flushChunkIndexItem
+	index             atomic.Value
 	idx               uint64
 	gen               uint64
 	currentChunkId    uint64
 	currentFlushChunk int
 	chunkCount        uint64
 	needClean         bool
+	flushed           atomic.Bool
+	spinlock          spinlock.RWMutex
 }
 
 // todo: add clean current chunk info
@@ -1021,8 +1041,6 @@ type flushChunk struct {
 	gen        []uint64
 	size       uint64
 	cleanChunk bool
-	flushed    atomic.Bool
-	lockedRead atomic.Bool
 }
 
 type flushChunkIndexItem struct {
