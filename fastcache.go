@@ -445,12 +445,7 @@ func (b *bucket) cleanFlusher(f *flusher) {
 	}
 
 	for j := range f.chunks {
-		f.chunks[j].h = f.chunks[j].h[:0]
-		f.chunks[j].idx = f.chunks[j].idx[:0]
-		f.chunks[j].chunk = f.chunks[j].chunk[:0]
-		f.chunks[j].size = 0
-		f.chunks[j].cleanChunk = false
-		f.chunks[j].gen = f.chunks[j].gen[:0]
+		f.chunks[j].clean()
 	}
 	f.chunkSynced.Store(f.chunks)
 	f.spinlock.Unlock()
@@ -460,6 +455,15 @@ func (b *bucket) cleanFlusher(f *flusher) {
 	f.count = 0
 	b.latestTimestamp = 0
 	atomic.StoreUint64(&b.writeBufferSize, 0)
+}
+
+func (b *flushChunk) clean() {
+	b.h = b.h[:0]
+	b.idx = b.idx[:0]
+	b.chunk = b.chunk[:0]
+	b.size = 0
+	b.cleanChunk = false
+	b.gen = b.gen[:0]
 }
 
 func (b *bucket) setBatchInternalMostOptimised(f *flusher) {
