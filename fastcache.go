@@ -274,10 +274,8 @@ type bucket struct {
 	stopWriting chan *struct{}
 	dropWriting bool
 	// m maps hash(k) to idx of (k, v) pair in chunks.
-	m           map[uint64]uint64
-	writeCache  []atomic.Value
-	flushBuffer []flushStruct
-	flusher     *flusher
+	m       map[uint64]uint64
+	flusher *flusher
 	// idx points to chunks for writing the next (k, v) pair.
 	idx atomic.Uint64
 
@@ -309,10 +307,7 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 	b.chunks = make([][]byte, maxChunks)
 	b.m = make(map[uint64]uint64)
 	b.Reset()
-	b.writeCache = make([]atomic.Value, primeNumber.NextPrime(uint64(maxBatch*2)))
-	for i := range b.writeCache {
-		b.writeCache[i].Store(makeNewBufferItem(4096))
-	}
+
 	if !syncWrite {
 		b.startProcessingWriteQueue(flushInterval, maxBatch)
 	}
@@ -321,15 +316,14 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 	b.setBuf = make(chan *insertValue, setBufSize)
 	b.stopWriting = make(chan *struct{})
-	b.flushBuffer = make([]flushStruct, maxBatch)
 	b.flusher = &flusher{
-		count:             0,
-		idx:               b.idx.Load(),
-		gen:               b.gen,
-		currentChunkId:    b.idx.Load() / chunkSize,
-		currentFlushChunk: 0,
-		chunkCount:        uint64(len(b.chunks)),
-		needClean:         false,
+		count:               0,
+		idx:                 b.idx.Load(),
+		gen:                 b.gen,
+		currentChunkId:      b.idx.Load() / chunkSize,
+		currentFlushChunkId: 0,
+		totalChunkCount:     uint64(len(b.chunks)),
+		needClean:           false,
 	}
 	b.flusher.chunks = make([]flushChunk, 4)
 	for i := 0; i < 4; i++ {
@@ -364,14 +358,12 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 
 func (b *bucket) onFlushTick(flushInterval int64) {
 	if b.writeBufferSize > 0 && time.Since(time.UnixMilli(b.latestTimestamp)).Milliseconds() >= flushInterval {
-		b.flushToCache()
-		atomic.StoreUint64(&b.writeBufferSize, 0)
-		b.resetWriteBuffer()
-		b.latestTimestamp = 0
+		b.setBatchInternalMostOptimised(b.flusher)
+		b.cleanFlusher(b.flusher)
 	}
 }
 
-func (b *bucket) onNewItemV2(i *insertValue, maxBatch int, flushInterval int64) {
+func (b *bucket) onNewItem(i *insertValue, maxBatch int, flushInterval int64) {
 	f := b.flusher
 
 	index := b.flusher.index.Load().([]flushChunkIndexItem)
@@ -379,11 +371,15 @@ func (b *bucket) onNewItemV2(i *insertValue, maxBatch int, flushInterval int64) 
 	duplicated := indexItem.exists(i.h)
 	if !duplicated {
 		kvLength := uint64(4) + uint64(len(i.K)) + uint64(len(i.V))
-		idxNew, newChunk := f.getNewIndexes(kvLength)
+		idxNew, newChunk := f.incrementIndexes(kvLength)
 		if newChunk {
-			f.currentFlushChunk++
+			f.currentFlushChunkId++
 		}
-		flushChunk := &f.chunks[f.currentFlushChunk]
+		if f.currentFlushChunkId > len(f.chunks) {
+			atomic.AddUint64(&b.droppedWrites, 1)
+		}
+		flushChunk := &f.chunks[f.currentFlushChunkId]
+
 		lenBuf := makeKvLenBuf(i.K, i.V)
 		flushChunk.chunk = append(flushChunk.chunk, lenBuf[:]...)
 		flushChunk.chunk = append(flushChunk.chunk, i.K...)
@@ -394,15 +390,9 @@ func (b *bucket) onNewItemV2(i *insertValue, maxBatch int, flushInterval int64) 
 		flushChunk.chunkId = f.currentChunkId
 		flushChunk.cleanChunk = newChunk
 
-		for j := range indexItem.h {
-			if indexItem.h[j] == 0 {
-				indexItem.h[j] = i.h
-				indexItem.currentIdx[j] = flushChunk.size
-				indexItem.flushChunk[j] = f.currentFlushChunk
-				break
-			}
-			b.flusher.index.Store(index)
-		}
+		indexItem.saveToIndex(i.h, flushChunk.size, f.currentFlushChunkId)
+		b.flusher.index.Store(index)
+
 		flushChunk.size += kvLength
 		f.idx = idxNew
 		f.count++
@@ -410,6 +400,7 @@ func (b *bucket) onNewItemV2(i *insertValue, maxBatch int, flushInterval int64) 
 			b.latestTimestamp = time.Now().UnixMilli()
 		}
 		b.flusher.chunkSynced.Store(b.flusher.chunks)
+		atomic.AddUint64(&b.writeBufferSize, 1)
 	} else {
 		atomic.AddUint64(&b.duplicatedCount, 1)
 	}
@@ -417,6 +408,17 @@ func (b *bucket) onNewItemV2(i *insertValue, maxBatch int, flushInterval int64) 
 	if f.count >= maxBatch || (f.count > 0 && time.Since(time.UnixMilli(b.latestTimestamp)).Milliseconds() >= flushInterval) {
 		b.setBatchInternalMostOptimised(f)
 		b.cleanFlusher(f)
+	}
+}
+
+func (i *flushChunkIndexItem) saveToIndex(h uint64, flushIdx uint64, chunk int) {
+	for j := range i.h {
+		if i.h[j] == 0 {
+			i.h[j] = h
+			i.currentIdx[j] = flushIdx
+			i.flushChunk[j] = chunk
+			break
+		}
 	}
 }
 
@@ -449,7 +451,7 @@ func (b *bucket) cleanFlusher(f *flusher) {
 	f.spinlock.Unlock()
 	f.flushed.Store(false)
 
-	f.currentFlushChunk = 0
+	f.currentFlushChunkId = 0
 	f.count = 0
 	b.latestTimestamp = 0
 	atomic.StoreUint64(&b.writeBufferSize, 0)
@@ -458,7 +460,7 @@ func (b *bucket) cleanFlusher(f *flusher) {
 func (b *bucket) setBatchInternalMostOptimised(f *flusher) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for i := 0; i <= f.currentFlushChunk; i++ {
+	for i := 0; i <= f.currentFlushChunkId; i++ {
 		f := &f.chunks[i]
 		chunk := b.chunks[f.chunkId]
 		if chunk == nil {
@@ -478,65 +480,6 @@ func (b *bucket) setBatchInternalMostOptimised(f *flusher) {
 	b.gen = f.gen
 	if f.needClean {
 		b.cleanLocked(f.idx)
-	}
-}
-
-func (b *bucket) onNewItem(i *insertValue, maxBatch int, flushInterval int64) {
-	h := i.h
-	bufValue := b.writeCache[h%uint64(len(b.writeCache))].Load().(*bufferItem)
-	duplicated := false
-	droppedWriting := false
-	for j := range bufValue.hash {
-		if bufValue.hash[j] == h {
-			duplicated = true
-		}
-	}
-	if !duplicated {
-		lenBuf := makeKvLenBuf(i.K, i.V)
-		currentIndex := len(bufValue.data)
-		if currentIndex+len(lenBuf)+len(i.K)+len(i.V) > chunkSize {
-			droppedWriting = true
-		}
-		if !droppedWriting {
-			bufValue.doLockedEdit(func(item *bufferItem) {
-				item.data = append(item.data, lenBuf[:]...)
-				item.data = append(item.data, i.K...)
-				item.data = append(item.data, i.V...)
-				item.hash = append(item.hash, h)
-				item.index = append(item.index, uint64(currentIndex))
-			})
-			b.writeCache[h%uint64(len(b.writeCache))].Store(bufValue)
-			atomic.AddUint64(&b.writeBufferSize, 1)
-			if b.latestTimestamp == 0 {
-				b.latestTimestamp = time.Now().UnixMilli()
-			}
-		}
-
-	}
-	if duplicated {
-		atomic.AddUint64(&b.duplicatedCount, 1)
-	}
-
-	if droppedWriting {
-		atomic.AddUint64(&b.droppedWrites, 1)
-	}
-
-	if b.writeBufferSize >= uint64(maxBatch) || (b.writeBufferSize > 0 && time.Since(time.UnixMilli(b.latestTimestamp)).Milliseconds() >= flushInterval) {
-		b.flushToCache()
-		atomic.StoreUint64(&b.writeBufferSize, 0)
-		b.resetWriteBuffer()
-		b.latestTimestamp = 0
-	}
-}
-
-func (b *bucket) resetWriteBuffer() {
-	for i := 0; i < len(b.writeCache); i++ {
-		bufItem := b.writeCache[i].Load().(*bufferItem)
-		bufItem.doLockedEdit(func(item *bufferItem) {
-			item.data = item.data[:0]
-			item.index = item.index[:0]
-			item.hash = item.hash[:0]
-		})
 	}
 }
 
@@ -700,97 +643,6 @@ func makeKvLenBuf(k []byte, v []byte) [4]byte {
 	return kvLenBuf
 }
 
-func (b *bucket) flushToCache() {
-	atomic.AddUint64(&b.batchSetCalls, 1)
-
-	needClean, idxNew, gen, itemCount := fillFlushBuffer(b)
-
-	atomic.AddUint64(&b.setCalls, uint64(itemCount))
-	b.setBatchInternal(b.flushBuffer[:itemCount], needClean, idxNew, gen)
-
-	for i := range b.flushBuffer {
-		b.flushBuffer[i].kv = b.flushBuffer[i].kv[:0]
-	}
-}
-
-func fillFlushBuffer(b *bucket) (bool, uint64, uint64, int) {
-	needClean := false
-	idx := b.idx.Load()
-	var idxNew uint64
-	gen := b.gen
-	chunkIdx := idx / chunkSize
-	chunks := b.chunks
-	writeBufIndex := 0
-	for i := 0; i < len(b.writeCache); i++ {
-		bufItem := b.writeCache[i].Load().(*bufferItem)
-		currentChunkIndex := uint64(0)
-		for j := range bufItem.index {
-			var kvEnd uint64
-			if j < len(bufItem.index)-1 {
-				kvEnd = bufItem.index[j+1]
-			} else {
-				kvEnd = uint64(len(bufItem.data))
-			}
-			kv := bufItem.data[currentChunkIndex:kvEnd]
-			b.flushBuffer[writeBufIndex].kv = kv
-			b.flushBuffer[writeBufIndex].h = bufItem.hash[j]
-			idxNew = idx + uint64(len(kv))
-			chunkIdxNew := idxNew / chunkSize
-			if chunkIdxNew > chunkIdx {
-				if chunkIdxNew >= uint64(len(chunks)) {
-					idx = 0
-					idxNew = uint64(len(kv))
-					chunkIdx = 0
-					gen++
-					if gen&((1<<genSizeBits)-1) == 0 {
-						gen++
-					}
-					needClean = true
-				} else {
-					idx = chunkIdxNew * chunkSize
-					idxNew = idx + uint64(len(kv))
-					chunkIdx = chunkIdxNew
-				}
-				b.flushBuffer[writeBufIndex].cleanChunk = true
-			} else {
-				b.flushBuffer[writeBufIndex].cleanChunk = false
-			}
-			b.flushBuffer[writeBufIndex].idx = idx
-			b.flushBuffer[writeBufIndex].gen = gen
-			b.flushBuffer[writeBufIndex].chunk = chunkIdx
-			writeBufIndex++
-			currentChunkIndex = kvEnd
-			idx = idxNew
-		}
-	}
-	return needClean, idxNew, gen, writeBufIndex
-}
-
-func (b *bucket) setBatchInternal(flushBuffer []flushStruct, needClean bool, idxNew uint64, genNew uint64) {
-	b.mu.Lock()
-	for i := 0; i < len(flushBuffer); i++ {
-		flushBuf := &flushBuffer[i]
-		chunk := b.chunks[flushBuf.chunk]
-		if flushBuf.cleanChunk {
-			chunk = chunk[:0]
-		}
-
-		if chunk == nil {
-			chunk = getChunk()
-			chunk = chunk[:0]
-		}
-
-		b.chunks[flushBuf.chunk] = append(chunk, flushBuf.kv...)
-		b.m[flushBuf.h] = flushBuf.idx | (flushBuf.gen << bucketSizeBits)
-	}
-	b.idx.Store(idxNew)
-	b.gen = genNew
-	if needClean {
-		b.cleanLocked(idxNew)
-	}
-	b.mu.Unlock()
-}
-
 func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool, bool) {
 	atomic.AddUint64(&b.getCalls, 1)
 	found := false
@@ -829,31 +681,6 @@ func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool, boo
 		}
 	}
 
-	/*
-		bufItem := b.writeCache[h%uint64(len(b.writeCache))].Load().(*bufferItem)
-		if len(bufItem.hash) > 0 {
-			if bufItem.doLockedReading(func(buffer *bufferItem) {
-				for i := range buffer.hash {
-					if bufItem.hash[i] == h {
-						startKv := bufItem.index[i]
-						kv := buffer.data
-						kvLenBuf := kv[startKv : startKv+4]
-						keyLen := (uint64(kvLenBuf[0]) << 8) | uint64(kvLenBuf[1])
-						if keyLen == uint64(len(k)) && string(k) == string(kv[startKv+4:startKv+4+keyLen]) {
-							if returnDst {
-								valLen := (uint64(kvLenBuf[2]) << 8) | uint64(kvLenBuf[3])
-								dst = append(dst, kv[startKv+4+keyLen:startKv+4+keyLen+valLen]...)
-								found = true
-							}
-						}
-					}
-				}
-
-			}) && found {
-				return dst, true
-			}
-		}
-	*/
 	chunks := b.chunks
 	b.mu.RLock()
 	currentIdx := b.idx.Load()
@@ -994,25 +821,25 @@ type flushStruct struct {
 }
 
 type flusher struct {
-	count             int
-	chunks            []flushChunk
-	chunkSynced       atomic.Value
-	index             atomic.Value
-	idx               uint64
-	gen               uint64
-	currentChunkId    uint64
-	currentFlushChunk int
-	chunkCount        uint64
-	needClean         bool
-	flushed           atomic.Bool
-	spinlock          spinlock.RWMutex
+	count               int
+	chunks              []flushChunk
+	chunkSynced         atomic.Value
+	index               atomic.Value
+	idx                 uint64
+	gen                 uint64
+	currentChunkId      uint64
+	currentFlushChunkId int
+	totalChunkCount     uint64
+	needClean           bool
+	flushed             atomic.Bool
+	spinlock            spinlock.RWMutex
 }
 
-func (f *flusher) getNewIndexes(kvLength uint64) (idxNew uint64, newChunk bool) {
+func (f *flusher) incrementIndexes(kvLength uint64) (idxNew uint64, newChunk bool) {
 	idxNew = f.idx + kvLength
 	chunkIdxNew := idxNew / chunkSize
 	if chunkIdxNew > f.currentChunkId {
-		if chunkIdxNew >= f.chunkCount {
+		if chunkIdxNew >= f.totalChunkCount {
 			f.idx = 0
 			idxNew = kvLength
 			f.currentChunkId = 0
@@ -1047,7 +874,7 @@ type flushChunkIndexItem struct {
 	currentIdx [7]uint64
 }
 
-func (i flushChunkIndexItem) exists(h uint64) bool {
+func (i *flushChunkIndexItem) exists(h uint64) bool {
 	for _, hv := range i.h {
 		if hv == h {
 			return true

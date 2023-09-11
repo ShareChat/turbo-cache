@@ -73,7 +73,7 @@ func BenchmarkBatchSet(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			for i := 0; i < items; i++ {
-				c.buckets[i%bucketsCount].setBatchInternal(buffer, true, 1, 1)
+				//	c.buckets[i%bucketsCount].setBatchInternal(buffer, true, 1, 1)
 			}
 		}
 	})

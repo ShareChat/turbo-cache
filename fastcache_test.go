@@ -322,36 +322,6 @@ func TestShouldDropWritingOnBufferOverflow(t *testing.T) {
 }
 
 func TestAsyncInsertToCache(t *testing.T) {
-	itemsCount := 64 * 1024
-	for _, batch := range []int{1, 3, 131, 1024} {
-		t.Run(fmt.Sprintf("batch_%d", batch), func(t *testing.T) {
-			c := New(NewConfigWithDroppingOnContention(30*itemsCount, 5, batch))
-			defer c.Close()
-			bucket := &c.buckets[0]
-			for i := 0; i < itemsCount; i++ {
-				key := []byte(fmt.Sprintf("key %d", i))
-				hash := xxhash.Sum64(key)
-				expectedValue := []byte(fmt.Sprintf("value %d", i))
-				bucket.onNewItem(&insertValue{
-					K: key,
-					V: expectedValue,
-					h: hash,
-				}, 1, 1)
-
-				actualValue, found, _ := bucket.Get(nil, key, hash, true)
-
-				if !found {
-					t.Fatalf("not found wanted key %s", string(key))
-				}
-				if string(expectedValue) != string(actualValue) {
-					t.Fatalf("key %s, wanted %s got %s", string(key), string(expectedValue), string(actualValue))
-				}
-			}
-		})
-	}
-}
-
-func TestAsyncInsertToCache2(t *testing.T) {
 	itemsCount := 64 * 1024 * 10
 	for _, batch := range []int{1, 3, 131, 1024} {
 		t.Run(fmt.Sprintf("batch_%d", batch), func(t *testing.T) {
@@ -363,7 +333,7 @@ func TestAsyncInsertToCache2(t *testing.T) {
 				key := []byte(fmt.Sprintf("key %d", i))
 				hash := xxhash.Sum64(key)
 				expectedValue := []byte(fmt.Sprintf("value %d", i))
-				bucket.onNewItemV2(&insertValue{
+				bucket.onNewItem(&insertValue{
 					K: key,
 					V: expectedValue,
 					h: hash,
@@ -401,7 +371,7 @@ func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
 				var wg sync.WaitGroup
 				for i := 0; i < itemsCount; i++ {
 					key := []byte(fmt.Sprintf("key %d", i))
-					bucket.onNewItemV2(&insertValue{
+					bucket.onNewItem(&insertValue{
 						K: key,
 						V: key,
 						h: xxhash.Sum64(key),
