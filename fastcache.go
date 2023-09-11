@@ -370,6 +370,8 @@ func (b *bucket) onFlushTick(flushInterval int64) {
 }
 
 func (b *bucket) onNewItem(i *insertValue, maxBatch int, flushInterval int64) {
+	defer releasePooledInsertValue(i)
+
 	f := b.flusher
 
 	index := b.flusher.index.Load().([]flushChunkIndexItem)
@@ -609,21 +611,17 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 	if sync {
 		b.setWithLock(k, v, h)
 	} else {
+		iv := getPooledInsertValue(k, v, h)
 
-		setBuf := &insertValue{
-			K: k,
-			V: v,
-			h: h,
-		}
 		if b.dropWriting {
 			select {
-			case b.setBuf <- setBuf:
+			case b.setBuf <- iv:
 				return
 			default:
 				atomic.AddUint64(&b.dropsInQueue, 1)
 			}
 		} else {
-			b.setBuf <- setBuf
+			b.setBuf <- iv
 		}
 
 	}
@@ -807,15 +805,6 @@ type bufferItem struct {
 	hash           []uint64
 }
 
-func makeNewBufferItem(initDataSize int) *bufferItem {
-	r := &bufferItem{
-		data:  make([]byte, 0, initDataSize),
-		index: make([]uint64, 0, 4),
-		hash:  make([]uint64, 0, 4),
-	}
-	return r
-}
-
 func (item *bufferItem) doLockedReading(updateFunc func(item *bufferItem)) bool {
 	if item.prelockForEdit.Load() {
 		return false
@@ -918,8 +907,14 @@ var insertValuePool = &sync.Pool{New: func() any {
 	return &insertValue{}
 }}
 
-func getPooledInsertValue() *insertValue {
-	return insertValuePool.Get().(*insertValue)
+func getPooledInsertValue(k, v []byte, h uint64) *insertValue {
+	result := insertValuePool.Get().(*insertValue)
+
+	result.K = k
+	result.V = v
+	result.h = h
+
+	return result
 }
 
 func releasePooledInsertValue(i *insertValue) {
