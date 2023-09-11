@@ -15,7 +15,7 @@ import (
 const cacheDelay = 100
 
 func TestCacheAsyncSmallBatch(t *testing.T) {
-	c := New(NewConfigWithDroppingOnContention(bucketsCount*chunkSize*1.5, defaultFlushInterval, 3))
+	c := New(NewConfig(bucketsCount*chunkSize*1.5, defaultFlushInterval, 3))
 	defer c.Close()
 
 	calls := uint64(1000)
@@ -50,7 +50,7 @@ func TestCacheAsyncSmallBatch(t *testing.T) {
 }
 
 func TestCacheAsync(t *testing.T) {
-	c := New(NewConfigWithDroppingOnContention(bucketsCount*chunkSize*1.5, defaultFlushInterval, 256))
+	c := New(NewConfig(bucketsCount*chunkSize*1.5, defaultFlushInterval, 256))
 	defer c.Close()
 
 	calls := uint64(100000)
@@ -246,7 +246,7 @@ func testCacheGetSet(c *Cache, itemsCount int) error {
 
 func TestShouldDropWritingOnBufferOverflow(t *testing.T) {
 	itemsCount := 512 * setBufSize * 4
-	c := New(NewConfigWithDroppingOnContention(30*itemsCount*10, 5, 100))
+	c := New(NewConfig(30*itemsCount*10, 5, 100))
 	c.Close()
 
 	for i := 0; i < itemsCount; i++ {
@@ -263,7 +263,7 @@ func TestAsyncInsertToCache(t *testing.T) {
 	itemsCount := 64 * 1024 * 10
 	for _, batch := range []int{1, 3, 131, 1024} {
 		t.Run(fmt.Sprintf("batch_%d", batch), func(t *testing.T) {
-			c := New(NewConfigWithDroppingOnContention(64*itemsCount*1024, 5, batch))
+			c := New(NewConfig(64*itemsCount*1024, 5, batch))
 			defer c.Close()
 			bucket := &c.buckets[0]
 			notFoundCount := 0
@@ -299,7 +299,7 @@ func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
 	itemsCount := 4 * 1024 * 1024
 	for _, batch := range []int{3, 131} {
 		t.Run(fmt.Sprintf("batch_%d", batch), func(t *testing.T) {
-			c := New(NewConfigWithDroppingOnContention(1024*itemsCount*1024, 500, batch))
+			c := New(NewConfig(1024*itemsCount*1024, 500, batch))
 			defer c.Close()
 
 			ch := make(chan string, 128)
@@ -467,5 +467,5 @@ func (c *Cache) getBigWithExpectedValue(dst, k []byte, expected []byte) []byte {
 }
 
 func newCacheConfigWithDefaultParams(maxBytes int) *Config {
-	return NewConfigWithDroppingOnContention(maxBytes, defaultFlushInterval, defaultBatchWriteSize)
+	return NewConfig(maxBytes, defaultFlushInterval, defaultBatchWriteSize)
 }

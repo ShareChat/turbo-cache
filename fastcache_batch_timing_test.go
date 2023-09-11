@@ -41,7 +41,7 @@ func BenchmarkBatchSetMostOptimised(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			for i := 0; i < items; i++ {
-				//		c.buckets[i%bucketsCount].setBatchInternalMostOptimised(buffer, true, 1, 1)
+				//		c.buckets[i%bucketsCount].setBatch(buffer, true, 1, 1)
 
 			}
 		}
