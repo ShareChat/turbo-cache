@@ -26,12 +26,3 @@ func NewConfig(maxBytes int, flushInterval int64, maxWriteBatch int) *Config {
 		dropWriteOnHighContention: true,
 	}
 }
-
-func NewConfigWithoutDropOnHighContention(maxBytes int, flushInterval int64, maxWriteBatch int) *Config {
-	return &Config{
-		maxBytes:                  maxBytes,
-		flushIntervalMillis:       flushInterval,
-		maxWriteBatch:             maxWriteBatch,
-		dropWriteOnHighContention: false,
-	}
-}
