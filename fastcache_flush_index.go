@@ -3,18 +3,20 @@
 // The package has been extracted from https://victoriametrics.com/
 package turbocache
 
+import "sync/atomic"
+
 type flushChunkIndexItem struct {
-	flushChunk [7]int
+	flushChunk [7]int32
 	h          [7]uint64
 	currentIdx [7]uint64
 }
 
-func (i *flushChunkIndexItem) saveToIndex(h uint64, flushIdx uint64, chunk int) {
+func (i *flushChunkIndexItem) saveToIndex(h uint64, flushIdx uint64, chunk int32) {
 	for j := range i.h {
-		if i.h[j] == 0 {
-			i.h[j] = h
-			i.currentIdx[j] = flushIdx
-			i.flushChunk[j] = chunk
+		if atomic.LoadUint64(&i.h[j]) == 0 {
+			atomic.StoreUint64(&i.currentIdx[j], flushIdx)
+			atomic.StoreInt32(&i.flushChunk[j], chunk)
+			atomic.StoreUint64(&i.h[j], h)
 			break
 		}
 	}
@@ -39,24 +41,24 @@ func (f *flusher) tryFindInFlushIndex(dst []byte, k []byte, h uint64, returnDst 
 	found := false
 	if !f.flushed.Load() {
 		index := f.index.Load().([]flushChunkIndexItem)
-		indexItem := (index)[h%uint64(len(index))]
-		for i := range indexItem.h {
-			if indexItem.h[i] == 0 {
+		indexPoint := h % uint64(len(index))
+		for i := 0; i < len(index[indexPoint].h); i++ {
+			hashValue := atomic.LoadUint64(&index[indexPoint].h[i])
+			if hashValue == 0 {
 				break
-			} else if indexItem.h[i] == h {
+			} else if hashValue == h {
 				if f.spinlock.TryRLock() {
 					index = f.index.Load().([]flushChunkIndexItem)
-					indexItem = (index)[h%uint64(len(index))]
-					if indexItem.h[i] == h {
-						chunkId := indexItem.flushChunk[i]
-						flushIdx := indexItem.currentIdx[i]
-						chunk := f.chunkSynced.Load().([]flushChunk)[chunkId]
-						kvLenBuf := chunk.chunk[flushIdx : flushIdx+kvLenBufSize]
+					if atomic.LoadUint64(&index[indexPoint].h[i]) == h {
+						chunkId := atomic.LoadInt32(&index[indexPoint].flushChunk[i])
+						flushIdx := atomic.LoadUint64(&index[indexPoint].currentIdx[i])
+						chunks := f.chunkSynced.Load().([]flushChunk)
+						kvLenBuf := chunks[chunkId].chunk[flushIdx : flushIdx+kvLenBufSize]
 						keyLen := (uint64(kvLenBuf[0]) << 8) | uint64(kvLenBuf[1])
-						if keyLen == uint64(len(k)) && string(k) == string(chunk.chunk[flushIdx+kvLenBufSize:flushIdx+kvLenBufSize+keyLen]) {
+						if keyLen == uint64(len(k)) && string(k) == string(chunks[chunkId].chunk[flushIdx+kvLenBufSize:flushIdx+kvLenBufSize+keyLen]) {
 							if returnDst {
 								valLen := (uint64(kvLenBuf[2]) << 8) | uint64(kvLenBuf[3])
-								dst = append(dst, chunk.chunk[flushIdx+kvLenBufSize+keyLen:flushIdx+kvLenBufSize+keyLen+valLen]...)
+								dst = append(dst, chunks[chunkId].chunk[flushIdx+kvLenBufSize+keyLen:flushIdx+kvLenBufSize+keyLen+valLen]...)
 								found = true
 							}
 						}

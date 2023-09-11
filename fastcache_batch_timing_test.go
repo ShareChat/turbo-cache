@@ -18,10 +18,10 @@ func BenchmarkBatchSetMostOptimised(b *testing.B) {
 	for i := 0; i < 2; i++ {
 		for j := 0; j < buffSize/2; j++ {
 			k[0] = byte(j)
-			kvLenBuf := makeKvLenBuf(k, v)
-			buffer[i].chunk = append(buffer[i].chunk, kvLenBuf[:]...)
-			buffer[i].chunk = append(buffer[i].chunk, k...)
-			buffer[i].chunk = append(buffer[i].chunk, v...)
+			//kvLenBuf := makeKvLenBuf(k, v)
+			/*	buffer[i].chunk = append(buffer[i].chunk, kvLenBuf[:]...)
+				buffer[i].chunk = append(buffer[i].chunk, k...)
+				buffer[i].chunk = append(buffer[i].chunk, v...)*/
 			buffer[i].h = append(buffer[i].h, xxhash.Sum64(k))
 			var lastIdx uint64
 			if len(buffer[i].idx) > 0 {

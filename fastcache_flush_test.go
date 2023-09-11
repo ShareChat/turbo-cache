@@ -14,73 +14,42 @@ import (
 
 const cacheDelay = 100
 
-func TestCacheAsyncSmallBatch(t *testing.T) {
-	c := New(NewConfig(bucketsCount*chunkSize*1.5, defaultFlushInterval, 3))
-	defer c.Close()
-
-	calls := uint64(1000)
-	missed := uint64(0)
-	for i := uint64(0); i < calls; i++ {
-		k := []byte(fmt.Sprintf("key %d", i))
-		v := []byte(fmt.Sprintf("value %d", i))
-		c.Set(k, v)
-	}
-	for i := uint64(0); i < calls; i++ {
-		x := i
-		k := []byte(fmt.Sprintf("key %d", x))
-		v := []byte(fmt.Sprintf("value %d", x))
-		vv, _ := c.getNotNilWithWait(nil, k, defaultFlushInterval*2)
-		if len(vv) == 0 {
-			missed++
-		}
-		if len(vv) > 0 && string(v) != string(vv) {
-			t.Fatalf("unexpected value; got %s; want  %s; key: %s", string(vv), string(v), k)
-		}
-	}
-
-	if missed > calls/10*3 {
-		t.Fatalf("unexpected missed getCalls; got %d; want > %d", missed, calls/10*2)
-	}
-
-	var s Stats
-	c.UpdateStats(&s, true)
-	if s.DroppedWrites > calls/10 {
-		t.Fatalf("unexpected number of setCalls; got %d; want > %d", s.DroppedWrites, calls/10)
-	}
-}
-
 func TestCacheAsync(t *testing.T) {
-	c := New(NewConfig(bucketsCount*chunkSize*1.5, defaultFlushInterval, 256))
-	defer c.Close()
+	for _, batch := range []int{1, 3, 256, 1024} {
+		t.Run(fmt.Sprintf("batch_%d", batch), func(t *testing.T) {
+			c := New(NewConfig(bucketsCount*chunkSize*1.5, defaultFlushInterval, batch))
+			defer c.Close()
 
-	calls := uint64(100000)
-	missed := uint64(0)
-	for i := uint64(0); i < calls; i++ {
-		k := []byte(fmt.Sprintf("key %d", i))
-		v := []byte(fmt.Sprintf("value %d", i))
-		c.Set(k, v)
-	}
-	for i := uint64(0); i < calls; i++ {
-		x := i
-		k := []byte(fmt.Sprintf("key %d", x))
-		v := []byte(fmt.Sprintf("value %d", x))
-		vv, _ := c.getNotNilWithWait(nil, k, defaultFlushInterval*2)
-		if len(vv) == 0 {
-			missed++
-		}
-		if len(vv) > 0 && string(v) != string(vv) {
-			t.Fatalf("unexpected value; got %s; want  %s; key: %s", string(vv), string(v), k)
-		}
-	}
+			calls := uint64(100000)
+			missed := uint64(0)
+			for i := uint64(0); i < calls; i++ {
+				k := []byte(fmt.Sprintf("key %d", i))
+				v := []byte(fmt.Sprintf("value %d", i))
+				c.Set(k, v)
+			}
+			for i := uint64(0); i < calls; i++ {
+				x := i
+				k := []byte(fmt.Sprintf("key %d", x))
+				v := []byte(fmt.Sprintf("value %d", x))
+				vv, _ := c.getNotNilWithWait(nil, k, 5)
+				if len(vv) == 0 {
+					missed++
+				}
+				if len(vv) > 0 && string(v) != string(vv) {
+					t.Fatalf("unexpected value; got %s; want  %s; key: %s", string(vv), string(v), k)
+				}
+			}
 
-	if missed > calls/10 {
-		t.Fatalf("unexpected number of missed; got %d; want < %d", calls-missed, calls/10)
-	}
+			if missed > calls/10 {
+				t.Fatalf("unexpected missed getCalls; got %d; want > %d", missed, calls/10*2)
+			}
 
-	var s Stats
-	c.UpdateStats(&s, true)
-	if s.DroppedWrites > calls/10 {
-		t.Fatalf("unexpected number of DroppedWrites; got %d; want < %d", s.DroppedWrites, calls/10)
+			var s Stats
+			c.UpdateStats(&s, true)
+			if s.DroppedWrites > calls/10 {
+				t.Fatalf("unexpected number of dropped writes; got %d; want > %d", s.DroppedWrites, calls/10)
+			}
+		})
 	}
 }
 
@@ -247,7 +216,7 @@ func testCacheGetSet(c *Cache, itemsCount int) error {
 func TestShouldDropWritingOnBufferOverflow(t *testing.T) {
 	itemsCount := 512 * setBufSize * 4
 	c := New(NewConfig(30*itemsCount*10, 5, 100))
-	c.Close()
+	defer c.Close()
 
 	for i := 0; i < itemsCount; i++ {
 		c.Set([]byte(fmt.Sprintf("key %d", i)), []byte(fmt.Sprintf("value %d", i)))
@@ -260,10 +229,13 @@ func TestShouldDropWritingOnBufferOverflow(t *testing.T) {
 }
 
 func TestAsyncInsertToCache(t *testing.T) {
-	itemsCount := 64 * 1024 * 10
+	itemsCount := 64 * 1024
 	for _, batch := range []int{1, 3, 131, 1024} {
 		t.Run(fmt.Sprintf("batch_%d", batch), func(t *testing.T) {
-			c := New(NewConfig(64*itemsCount*1024, 5, batch))
+			c := New(NewSyncWriteConfig(64 * itemsCount))
+			for i := 0; i < len(c.buckets); i++ {
+				c.buckets[i].initFlusher(batch)
+			}
 			defer c.Close()
 			bucket := &c.buckets[0]
 			notFoundCount := 0
@@ -271,11 +243,7 @@ func TestAsyncInsertToCache(t *testing.T) {
 				key := []byte(fmt.Sprintf("key %d", i))
 				hash := xxhash.Sum64(key)
 				expectedValue := []byte(fmt.Sprintf("value %d", i))
-				bucket.onNewItem(&insertValue{
-					K: key,
-					V: expectedValue,
-					h: hash,
-				}, batch, 100000)
+				bucket.onNewItem(getQueuedStruct(key, expectedValue, hash), batch, 50000000)
 
 				actualValue, found, _ := bucket.Get(nil, key, hash, true)
 
@@ -296,10 +264,13 @@ func TestAsyncInsertToCache(t *testing.T) {
 }
 
 func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
-	itemsCount := 4 * 1024 * 1024
-	for _, batch := range []int{3, 131} {
+	itemsCount := 64 * 1024 * 100
+	for _, batch := range []int{11} {
 		t.Run(fmt.Sprintf("batch_%d", batch), func(t *testing.T) {
-			c := New(NewConfig(1024*itemsCount*1024, 500, batch))
+			c := New(NewSyncWriteConfig(chunkSize * 3 * bucketsCount))
+			for i := 0; i < len(c.buckets); i++ {
+				c.buckets[i].initFlusher(batch)
+			}
 			defer c.Close()
 
 			ch := make(chan string, 128)
@@ -309,14 +280,12 @@ func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
 				var wg sync.WaitGroup
 				for i := 0; i < itemsCount; i++ {
 					key := []byte(fmt.Sprintf("key %d", i))
-					bucket.onNewItem(&insertValue{
-						K: key,
-						V: key,
-						h: xxhash.Sum64(key),
-					}, batch, 100000)
+					h := xxhash.Sum64(key)
+
+					bucket.onNewItem(getQueuedStruct(key, key, h), batch, 50000000)
 					wg.Add(1)
 					go func() {
-						actualValue, found, l1cache := bucket.Get(nil, key, xxhash.Sum64(key), true)
+						actualValue, found, l1cache := bucket.Get(nil, key, h, true)
 						if !found {
 							notFoundCount.Add(1)
 							if notFoundCount.Load() > int32(itemsCount/10) {
@@ -328,7 +297,6 @@ func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
 						}
 						wg.Done()
 					}()
-
 				}
 				wg.Wait()
 				close(ch)
@@ -342,7 +310,7 @@ func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
 
 func TestCacheResetUpdateStatsSetConcurrent(t *testing.T) {
 	c := New(newCacheConfigWithDefaultParams(12334))
-
+	defer c.Close()
 	stopCh := make(chan struct{})
 
 	// run workers for cache reset

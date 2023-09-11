@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const setBufSize = 128
+const setBufSize = 64
 const defaultMaxWriteSizeBatch = 250
 const defaultFlushIntervalMillis = 5
 
@@ -111,10 +111,6 @@ func (bs *BigStats) reset() {
 	atomic.StoreUint64(&bs.InvalidMetavalueErrors, 0)
 	atomic.StoreUint64(&bs.InvalidValueLenErrors, 0)
 	atomic.StoreUint64(&bs.InvalidValueHashErrors, 0)
-}
-
-func (b *bucket) stopAsyncWriting() {
-	b.stopWriting <- &struct{}{}
 }
 
 // Cache is a fast thread-safe inmemory cache optimized for big number
@@ -240,7 +236,7 @@ func (c *Cache) Close() {
 	c.Reset()
 	if !c.syncWrite {
 		for i := range c.buckets[:] {
-			c.buckets[i].stopAsyncWriting()
+			close(c.buckets[i].setBuf)
 		}
 	}
 }
@@ -270,7 +266,7 @@ type bucket struct {
 	// It consists of 64KB chunks.
 	chunks [][]byte
 
-	setBuf      chan *insertValue
+	setBuf      chan *queuedStruct
 	stopWriting chan *struct{}
 	dropWriting bool
 	// m maps hash(k) to idx of (k, v) pair in chunks.
@@ -313,8 +309,30 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 }
 
 func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
-	b.setBuf = make(chan *insertValue, setBufSize)
-	b.stopWriting = make(chan *struct{})
+	b.setBuf = make(chan *queuedStruct, setBufSize)
+	b.initFlusher(maxBatch)
+	go func() {
+		maxDelay := flushInterval
+		if maxDelay > 5 {
+			maxDelay = 5
+		}
+		b.randomDelay(maxDelay)
+		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
+		for {
+			select {
+			case i := <-b.setBuf:
+				if i == nil {
+					return
+				}
+				b.onNewItem(i, maxBatch, flushInterval)
+			case _ = <-t:
+				b.onFlushTick(flushInterval)
+			}
+		}
+	}()
+}
+
+func (b *bucket) initFlusher(maxBatch int) {
 	b.flusher = &flusher{
 		count:               0,
 		idx:                 b.idx.Load(),
@@ -333,7 +351,7 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 	for i := 0; i < 4; i++ {
 		b.flusher.chunks[i] = flushChunk{
 			chunkId:    0,
-			chunk:      getChunk()[:0],
+			chunk:      *getChunkArray(),
 			h:          make([]uint64, 0, itemsPerChunk),
 			idx:        make([]uint64, 0, itemsPerChunk),
 			gen:        make([]uint64, 0, itemsPerChunk),
@@ -344,20 +362,6 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 	b.flusher.chunkSynced.Store(b.flusher.chunks)
 	index := make([]flushChunkIndexItem, primeNumber.NextPrime(uint64(maxBatch)))
 	b.flusher.index.Store(index)
-	go func() {
-		b.randomDelay(flushInterval)
-		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
-		for {
-			select {
-			case i := <-b.setBuf:
-				b.onNewItem(i, maxBatch, flushInterval)
-			case _ = <-t:
-				b.onFlushTick(flushInterval)
-			case <-b.stopWriting:
-				return
-			}
-		}
-	}()
 }
 
 func (b *bucket) Reset() {
@@ -466,7 +470,7 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 	if sync {
 		b.syncSet(k, v, h)
 	} else {
-		iv := getPooledInsertValue(k, v, h)
+		iv := getQueuedStruct(k, v, h)
 
 		if b.dropWriting {
 			select {
@@ -603,9 +607,4 @@ func (b *bucket) Del(h uint64) {
 	b.mu.Lock()
 	delete(b.m, h)
 	b.mu.Unlock()
-}
-
-type insertValue struct {
-	K, V []byte
-	h    uint64
 }

@@ -19,7 +19,7 @@ type flusher struct {
 	idx                 uint64
 	gen                 uint64
 	currentChunkId      uint64
-	currentFlushChunkId int
+	currentFlushChunkId int32
 	totalChunkCount     uint64
 	needClean           bool
 	flushed             atomic.Bool
@@ -28,7 +28,7 @@ type flusher struct {
 
 type flushChunk struct {
 	chunkId    uint64
-	chunk      []byte
+	chunk      [chunkSize]byte
 	h          []uint64
 	idx        []uint64
 	gen        []uint64
@@ -37,20 +37,20 @@ type flushChunk struct {
 }
 
 func (b *bucket) onFlushTick(flushInterval int64) {
-	if b.writeBufferSize > 0 && time.Since(time.UnixMilli(b.latestTimestamp)).Milliseconds() >= flushInterval {
+	if b.flusher.count > 0 && time.Since(time.UnixMilli(b.latestTimestamp)).Milliseconds() >= flushInterval {
 		b.setBatch(b.flusher)
 		b.cleanFlusher(b.flusher)
 	}
 }
 
-func (b *bucket) onNewItem(i *insertValue, maxBatch int, flushInterval int64) {
-	defer releasePooledInsertValue(i)
+func (b *bucket) onNewItem(i *queuedStruct, maxBatch int, flushInterval int64) {
+	defer releaseQueuedStruct(i)
 
 	f := b.flusher
 
 	index := b.flusher.index.Load().([]flushChunkIndexItem)
-	indexItem := &index[i.h%uint64(len(index))]
-	duplicated := indexItem.exists(i.h)
+	indexId := i.h % uint64(len(index))
+	duplicated := index[indexId].exists(i.h)
 	forceFlush := false
 	if !duplicated {
 		kvLength := uint64(4) + uint64(len(i.K)) + uint64(len(i.V))
@@ -58,20 +58,31 @@ func (b *bucket) onNewItem(i *insertValue, maxBatch int, flushInterval int64) {
 		if newChunk {
 			f.currentFlushChunkId++
 		}
-		if f.currentFlushChunkId <= len(f.chunks) {
+		if f.currentFlushChunkId <= int32(len(f.chunks)) {
 			flushChunk := &f.chunks[f.currentFlushChunkId]
 
 			lenBuf := makeKvLenBuf(i.K, i.V)
-			flushChunk.chunk = append(flushChunk.chunk, lenBuf[:]...)
-			flushChunk.chunk = append(flushChunk.chunk, i.K...)
-			flushChunk.chunk = append(flushChunk.chunk, i.V...)
+			//f.spinlock.Lock()
+			copy(flushChunk.chunk[flushChunk.size:], lenBuf[:])
+			copy(flushChunk.chunk[flushChunk.size+4:], i.K)
+			copy(flushChunk.chunk[flushChunk.size+4+uint64(len(i.K)):], i.V)
+
+			//f.spinlock.Unlock()
 			flushChunk.h = append(flushChunk.h, i.h)
 			flushChunk.idx = append(flushChunk.idx, f.idx)
 			flushChunk.gen = append(flushChunk.gen, f.gen)
 			flushChunk.chunkId = f.currentChunkId
 			flushChunk.cleanChunk = newChunk
 
-			indexItem.saveToIndex(i.h, flushChunk.size, f.currentFlushChunkId)
+			for j := range index[indexId].h {
+				if atomic.LoadUint64(&index[indexId].h[j]) == 0 {
+					atomic.StoreUint64(&index[indexId].currentIdx[j], flushChunk.size)
+					atomic.StoreInt32(&index[indexId].flushChunk[j], f.currentFlushChunkId)
+					atomic.StoreUint64(&index[indexId].h[j], i.h)
+					break
+				}
+			}
+
 			b.flusher.index.Store(index)
 
 			flushChunk.size += kvLength
@@ -97,6 +108,33 @@ func (b *bucket) onNewItem(i *insertValue, maxBatch int, flushInterval int64) {
 	}
 }
 
+func (b *bucket) setBatch(f *flusher) {
+	atomic.AddUint64(&b.setCalls, uint64(f.count))
+	atomic.AddUint64(&b.batchSetCalls, 1)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i := int32(0); i <= f.currentFlushChunkId; i++ {
+		f := &f.chunks[i]
+		chunk := b.chunks[f.chunkId]
+		if chunk == nil {
+			chunk = getChunk()[:0]
+		} else if f.cleanChunk {
+			chunk = chunk[:0]
+		}
+
+		b.chunks[f.chunkId] = append(chunk, f.chunk[:f.size]...)
+
+		for j := 0; j < len(f.h); j++ {
+			b.m[f.h[j]] = f.idx[j] | (f.gen[j] << bucketSizeBits)
+		}
+	}
+	b.idx.Store(f.idx)
+	b.gen = f.gen
+	if f.needClean {
+		b.cleanLocked(f.idx)
+	}
+}
+
 func (b *bucket) cleanFlusher(f *flusher) {
 	index := b.flusher.index.Load().([]flushChunkIndexItem)
 	f.flushed.Store(true)
@@ -104,10 +142,10 @@ func (b *bucket) cleanFlusher(f *flusher) {
 
 	for i := 0; i < len(index); i++ {
 		for j := range index[i].h {
-			if index[i].h[j] != 0 {
-				index[i].h[j] = 0
-				index[i].currentIdx[j] = 0
-				index[i].flushChunk[j] = 0
+			if atomic.LoadUint64(&index[i].h[j]) != 0 {
+				atomic.StoreUint64(&index[i].currentIdx[j], 0)
+				atomic.StoreInt32(&index[i].flushChunk[j], 0)
+				atomic.StoreUint64(&index[i].h[j], 0)
 			} else {
 				break
 			}
@@ -130,37 +168,9 @@ func (b *bucket) cleanFlusher(f *flusher) {
 func (b *flushChunk) clean() {
 	b.h = b.h[:0]
 	b.idx = b.idx[:0]
-	b.chunk = b.chunk[:0]
 	b.size = 0
 	b.cleanChunk = false
 	b.gen = b.gen[:0]
-}
-
-func (b *bucket) setBatch(f *flusher) {
-	atomic.AddUint64(&b.setCalls, uint64(f.count))
-	atomic.AddUint64(&b.batchSetCalls, 1)
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for i := 0; i <= f.currentFlushChunkId; i++ {
-		f := &f.chunks[i]
-		chunk := b.chunks[f.chunkId]
-		if chunk == nil {
-			chunk = getChunk()[:0]
-		} else if f.cleanChunk {
-			chunk = chunk[:0]
-		}
-
-		b.chunks[f.chunkId] = append(chunk, f.chunk...)
-
-		for j := 0; j < len(f.h); j++ {
-			b.m[f.h[j]] = f.idx[j] | (f.gen[j] << bucketSizeBits)
-		}
-	}
-	b.idx.Store(f.idx)
-	b.gen = f.gen
-	if f.needClean {
-		b.cleanLocked(f.idx)
-	}
 }
 
 func (b *bucket) randomDelay(maxDelayMillis int64) {
@@ -192,11 +202,11 @@ func (f *flusher) incrementIndexes(kvLength uint64) (idxNew uint64, newChunk boo
 }
 
 var insertValuePool = &sync.Pool{New: func() any {
-	return &insertValue{}
+	return &queuedStruct{}
 }}
 
-func getPooledInsertValue(k, v []byte, h uint64) *insertValue {
-	result := insertValuePool.Get().(*insertValue)
+func getQueuedStruct(k, v []byte, h uint64) *queuedStruct {
+	result := insertValuePool.Get().(*queuedStruct)
 
 	result.K = k
 	result.V = v
@@ -205,10 +215,15 @@ func getPooledInsertValue(k, v []byte, h uint64) *insertValue {
 	return result
 }
 
-func releasePooledInsertValue(i *insertValue) {
+func releaseQueuedStruct(i *queuedStruct) {
 	i.K = nil
 	i.V = nil
 	i.h = 0
 
 	insertValuePool.Put(i)
+}
+
+type queuedStruct struct {
+	K, V []byte
+	h    uint64
 }
