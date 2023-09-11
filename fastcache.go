@@ -609,7 +609,7 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 		return
 	}
 	if sync {
-		b.setWithLock(k, v, h)
+		b.syncSet(k, v, h)
 	} else {
 		iv := getPooledInsertValue(k, v, h)
 
@@ -627,28 +627,59 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 	}
 }
 
-// todo: copy previos implementation
-func (b *bucket) setWithLock(k, v []byte, h uint64) {
+func (b *bucket) syncSet(k, v []byte, h uint64) {
 	atomic.AddUint64(&b.setCalls, 1)
 	if len(k) >= (1<<16) || len(v) >= (1<<16) {
 		// Too big key or value - its length cannot be encoded
 		// with 2 bytes (see below). Skip the entry.
 		return
 	}
-	kvLenBuf := makeKvLenBuf(k, v)
-	kv := make([]byte, 0, len(k)+len(v)+4)
-	kv = append(kv, kvLenBuf[:]...)
-	kv = append(kv, k...)
-	kv = append(kv, v...)
-	needClean := false
+	var kvLenBuf [4]byte
+	kvLenBuf[0] = byte(uint16(len(k)) >> 8)
+	kvLenBuf[1] = byte(len(k))
+	kvLenBuf[2] = byte(uint16(len(v)) >> 8)
+	kvLenBuf[3] = byte(len(v))
+	kvLen := uint64(len(kvLenBuf) + len(k) + len(v))
+	if kvLen >= chunkSize {
+		// Do not store too big keys and values, since they do not
+		// fit a chunk.
+		return
+	}
+
 	b.mu.Lock()
 	idx := b.idx.Load()
+	idxNew := idx + kvLen
 	chunkIdx := idx / chunkSize
-	defer b.mu.Unlock()
-	if needClean, idx, _ = b.set(kv, h, idx, chunkIdx, needClean); needClean {
-		b.cleanLocked(idx)
+	chunkIdxNew := idxNew / chunkSize
+	if chunkIdxNew > chunkIdx {
+		if chunkIdxNew >= uint64(len(b.chunks)) {
+			idx = 0
+			idxNew = kvLen
+			chunkIdx = 0
+			b.gen++
+			if b.gen&((1<<genSizeBits)-1) == 0 {
+				b.gen++
+			}
+		} else {
+			idx = chunkIdxNew * chunkSize
+			idxNew = idx + kvLen
+			chunkIdx = chunkIdxNew
+		}
+		b.chunks[chunkIdx] = b.chunks[chunkIdx][:0]
 	}
-	b.idx.Store(idx)
+	chunk := b.chunks[chunkIdx]
+	if chunk == nil {
+		chunk = getChunk()
+		chunk = chunk[:0]
+	}
+	chunk = append(chunk, kvLenBuf[:]...)
+	chunk = append(chunk, k...)
+	chunk = append(chunk, v...)
+	b.chunks[chunkIdx] = chunk
+	b.m[h] = idx | (b.gen << bucketSizeBits)
+	b.idx.Store(idxNew)
+	b.cleanLocked(idxNew)
+	b.mu.Unlock()
 }
 
 func makeKvLenBuf(k []byte, v []byte) [4]byte {
