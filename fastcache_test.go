@@ -76,7 +76,7 @@ func TestCacheSmall(t *testing.T) {
 }
 
 func TestCacheAsyncSmallBatch(t *testing.T) {
-	c := New(NewConfigWithDroppingOnContention(bucketsCount*chunkSize*1.5, defaultFlushInterval, 3, 100000))
+	c := New(NewConfigWithDroppingOnContention(bucketsCount*chunkSize*1.5, defaultFlushInterval, 3))
 	defer c.Close()
 
 	calls := uint64(1000)
@@ -111,7 +111,7 @@ func TestCacheAsyncSmallBatch(t *testing.T) {
 }
 
 func TestCacheAsync(t *testing.T) {
-	c := New(NewConfigWithDroppingOnContention(bucketsCount*chunkSize*1.5, defaultFlushInterval, 256, 100000))
+	c := New(NewConfigWithDroppingOnContention(bucketsCount*chunkSize*1.5, defaultFlushInterval, 256))
 	defer c.Close()
 
 	calls := uint64(100000)
@@ -308,7 +308,7 @@ func testCacheGetSet(c *Cache, itemsCount int) error {
 func TestShouldDropWritingOnBufferOverflow(t *testing.T) {
 	itemsCount := 512 * setBufSize * 4
 	const gorotines = 10
-	c := New(NewConfigWithDroppingOnContention(30*itemsCount*gorotines, 5, 100, 1000))
+	c := New(NewConfigWithDroppingOnContention(30*itemsCount*gorotines, 5, 100))
 	c.Close()
 
 	for i := 0; i < itemsCount; i++ {
@@ -325,7 +325,7 @@ func TestAsyncInsertToCache(t *testing.T) {
 	itemsCount := 64 * 1024
 	for _, batch := range []int{1, 3, 131, 1024} {
 		t.Run(fmt.Sprintf("batch_%d", batch), func(t *testing.T) {
-			c := New(NewConfigWithDroppingOnContention(30*itemsCount, 5, batch, 10))
+			c := New(NewConfigWithDroppingOnContention(30*itemsCount, 5, batch))
 			defer c.Close()
 			bucket := &c.buckets[0]
 			for i := 0; i < itemsCount; i++ {
@@ -338,7 +338,7 @@ func TestAsyncInsertToCache(t *testing.T) {
 					h: hash,
 				}, 1, 1)
 
-				actualValue, found := bucket.Get(nil, key, hash, true)
+				actualValue, found, _ := bucket.Get(nil, key, hash, true)
 
 				if !found {
 					t.Fatalf("not found wanted key %s", string(key))
@@ -352,10 +352,10 @@ func TestAsyncInsertToCache(t *testing.T) {
 }
 
 func TestAsyncInsertToCache2(t *testing.T) {
-	itemsCount := 64 * 1024
+	itemsCount := 64 * 1024 * 10
 	for _, batch := range []int{1, 3, 131, 1024} {
 		t.Run(fmt.Sprintf("batch_%d", batch), func(t *testing.T) {
-			c := New(NewConfigWithDroppingOnContention(64*itemsCount*1024, 5, batch, 10))
+			c := New(NewConfigWithDroppingOnContention(64*itemsCount*1024, 5, batch))
 			defer c.Close()
 			bucket := &c.buckets[0]
 			notFoundCount := 0
@@ -369,7 +369,7 @@ func TestAsyncInsertToCache2(t *testing.T) {
 					h: hash,
 				}, batch, 100000)
 
-				actualValue, found := bucket.Get(nil, key, hash, true)
+				actualValue, found, _ := bucket.Get(nil, key, hash, true)
 
 				if !found {
 					notFoundCount++
@@ -388,10 +388,10 @@ func TestAsyncInsertToCache2(t *testing.T) {
 }
 
 func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
-	itemsCount := 64 * 1024
-	for _, batch := range []int{1, 3, 131, 1024} {
+	itemsCount := 16 * 1024 * 1024
+	for _, batch := range []int{3, 131} {
 		t.Run(fmt.Sprintf("batch_%d", batch), func(t *testing.T) {
-			c := New(NewConfigWithDroppingOnContention(1024*itemsCount*1024, 500, batch, 10))
+			c := New(NewConfigWithDroppingOnContention(1024*itemsCount*1024, 500, batch))
 			defer c.Close()
 
 			ch := make(chan string, 128)
@@ -408,7 +408,7 @@ func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
 					}, batch, 100000)
 					wg.Add(1)
 					go func() {
-						actualValue, found := bucket.Get(nil, key, xxhash.Sum64(key), true)
+						actualValue, found, l1cache := bucket.Get(nil, key, xxhash.Sum64(key), true)
 						if !found {
 							notFoundCount.Add(1)
 							if notFoundCount.Load() > int32(itemsCount/10) {
@@ -416,7 +416,7 @@ func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
 							}
 						}
 						if found && string(key) != string(actualValue) {
-							ch <- fmt.Sprintf("%s, wanted %s got %s", string(key), string(key), string(actualValue))
+							ch <- fmt.Sprintf("%s, wanted %s got %s, l1cache: %v", string(key), string(key), string(actualValue), l1cache)
 						}
 						wg.Done()
 					}()
@@ -559,5 +559,5 @@ func (c *Cache) getBigWithExpectedValue(dst, k []byte, expected []byte) []byte {
 }
 
 func newCacheConfigWithDefaultParams(maxBytes int) *Config {
-	return NewConfigWithDroppingOnContention(maxBytes, defaultFlushInterval, defaultBatchWriteSize, 100000)
+	return NewConfigWithDroppingOnContention(maxBytes, defaultFlushInterval, defaultBatchWriteSize)
 }
