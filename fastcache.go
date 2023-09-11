@@ -30,6 +30,7 @@ const maxGen = 1<<genSizeBits - 1
 
 const maxBucketSize uint64 = 1 << bucketSizeBits
 const initItemsPerFlushChunk = 128
+const kvLenBufSize = 4
 
 // Stats represents cache stats.
 //
@@ -655,42 +656,11 @@ func makeKvLenBuf(k []byte, v []byte) [4]byte {
 
 func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool, bool) {
 	atomic.AddUint64(&b.getCalls, 1)
-	found := false
-	const kvLenBufSize = 4
-	if !b.flusher.flushed.Load() {
-		index := b.flusher.index.Load().([]flushChunkIndexItem)
-		indexItem := (index)[h%uint64(len(index))]
-		for i := range indexItem.h {
-			if indexItem.h[i] == 0 {
-				break
-			} else if indexItem.h[i] == h {
-				if b.flusher.spinlock.TryRLock() {
-					index = b.flusher.index.Load().([]flushChunkIndexItem)
-					indexItem = (index)[h%uint64(len(index))]
-					if indexItem.h[i] == h {
-						chunkId := indexItem.flushChunk[i]
-						flushIdx := indexItem.currentIdx[i]
-						chunks := b.flusher.chunkSynced.Load().([]flushChunk)
-						chunk := chunks[chunkId]
-						kvLenBuf := chunk.chunk[flushIdx : flushIdx+kvLenBufSize]
-						keyLen := (uint64(kvLenBuf[0]) << 8) | uint64(kvLenBuf[1])
-						if keyLen == uint64(len(k)) && string(k) == string(chunk.chunk[flushIdx+kvLenBufSize:flushIdx+kvLenBufSize+keyLen]) {
-							if returnDst {
-								valLen := (uint64(kvLenBuf[2]) << 8) | uint64(kvLenBuf[3])
-								dst = append(dst, chunk.chunk[flushIdx+kvLenBufSize+keyLen:flushIdx+kvLenBufSize+keyLen+valLen]...)
-								found = true
-							}
-						}
-					}
-					b.flusher.spinlock.RUnlock()
-				}
-			}
-		}
-		if found {
-			return dst, found, true
-		}
-	}
 
+	bytes, found := b.tryFindInFlushBuffer(dst, k, h, returnDst)
+	if found {
+		return bytes, found, true
+	}
 	chunks := b.chunks
 	b.mu.RLock()
 	currentIdx := b.idx.Load()
@@ -735,6 +705,47 @@ end:
 		atomic.AddUint64(&b.misses, 1)
 	}
 	return dst, found, false
+}
+
+func (b *bucket) tryFindInFlushBuffer(dst []byte, k []byte, h uint64, returnDst bool) ([]byte, bool) {
+	if b.flusher == nil {
+		return dst, false
+	}
+
+	found := false
+	if !b.flusher.flushed.Load() {
+		index := b.flusher.index.Load().([]flushChunkIndexItem)
+		indexItem := (index)[h%uint64(len(index))]
+		for i := range indexItem.h {
+			if indexItem.h[i] == 0 {
+				break
+			} else if indexItem.h[i] == h {
+				if b.flusher.spinlock.TryRLock() {
+					index = b.flusher.index.Load().([]flushChunkIndexItem)
+					indexItem = (index)[h%uint64(len(index))]
+					if indexItem.h[i] == h {
+						chunkId := indexItem.flushChunk[i]
+						flushIdx := indexItem.currentIdx[i]
+						chunk := b.flusher.chunkSynced.Load().([]flushChunk)[chunkId]
+						kvLenBuf := chunk.chunk[flushIdx : flushIdx+kvLenBufSize]
+						keyLen := (uint64(kvLenBuf[0]) << 8) | uint64(kvLenBuf[1])
+						if keyLen == uint64(len(k)) && string(k) == string(chunk.chunk[flushIdx+kvLenBufSize:flushIdx+kvLenBufSize+keyLen]) {
+							if returnDst {
+								valLen := (uint64(kvLenBuf[2]) << 8) | uint64(kvLenBuf[3])
+								dst = append(dst, chunk.chunk[flushIdx+kvLenBufSize+keyLen:flushIdx+kvLenBufSize+keyLen+valLen]...)
+								found = true
+							}
+						}
+					}
+					b.flusher.spinlock.RUnlock()
+				}
+			}
+		}
+		if found {
+			return dst, found
+		}
+	}
+	return dst, false
 }
 
 func (b *bucket) Del(h uint64) {
