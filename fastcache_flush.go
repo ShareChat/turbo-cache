@@ -160,6 +160,7 @@ func (b *bucket) cleanFlusher(f *flusher) {
 	f.flushed.Store(false)
 
 	f.currentFlushChunkId = 0
+	f.needClean = false
 	f.count = 0
 	b.latestTimestamp = 0
 	atomic.StoreUint64(&b.writeBufferSize, 0)

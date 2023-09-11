@@ -505,13 +505,15 @@ func (b *bucket) syncSet(k, v []byte, h uint64) {
 		return
 	}
 
+	chunks := b.chunks
+	needClean := false
 	b.mu.Lock()
 	idx := b.idx.Load()
 	idxNew := idx + kvLen
 	chunkIdx := idx / chunkSize
 	chunkIdxNew := idxNew / chunkSize
 	if chunkIdxNew > chunkIdx {
-		if chunkIdxNew >= uint64(len(b.chunks)) {
+		if chunkIdxNew >= uint64(len(chunks)) {
 			idx = 0
 			idxNew = kvLen
 			chunkIdx = 0
@@ -519,14 +521,15 @@ func (b *bucket) syncSet(k, v []byte, h uint64) {
 			if b.gen&((1<<genSizeBits)-1) == 0 {
 				b.gen++
 			}
+			needClean = true
 		} else {
 			idx = chunkIdxNew * chunkSize
 			idxNew = idx + kvLen
 			chunkIdx = chunkIdxNew
 		}
-		b.chunks[chunkIdx] = b.chunks[chunkIdx][:0]
+		chunks[chunkIdx] = chunks[chunkIdx][:0]
 	}
-	chunk := b.chunks[chunkIdx]
+	chunk := chunks[chunkIdx]
 	if chunk == nil {
 		chunk = getChunk()
 		chunk = chunk[:0]
@@ -534,10 +537,12 @@ func (b *bucket) syncSet(k, v []byte, h uint64) {
 	chunk = append(chunk, kvLenBuf[:]...)
 	chunk = append(chunk, k...)
 	chunk = append(chunk, v...)
-	b.chunks[chunkIdx] = chunk
+	chunks[chunkIdx] = chunk
 	b.m[h] = idx | (b.gen << bucketSizeBits)
 	b.idx.Store(idxNew)
-	b.cleanLocked(idxNew)
+	if needClean {
+		b.cleanLocked(idxNew)
+	}
 	b.mu.Unlock()
 }
 
