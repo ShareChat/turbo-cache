@@ -29,6 +29,7 @@ const genSizeBits = 64 - bucketSizeBits
 const maxGen = 1<<genSizeBits - 1
 
 const maxBucketSize uint64 = 1 << bucketSizeBits
+const initItemsPerFlushChunk = 128
 
 // Stats represents cache stats.
 //
@@ -296,7 +297,6 @@ type bucket struct {
 }
 
 func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWrite bool) {
-
 	if maxBytes == 0 {
 		panic(fmt.Errorf("maxBytes cannot be zero"))
 	}
@@ -326,13 +326,18 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 		needClean:           false,
 	}
 	b.flusher.chunks = make([]flushChunk, 4)
+
+	itemsPerChunk := maxBatch
+	if initItemsPerFlushChunk < itemsPerChunk {
+		itemsPerChunk = initItemsPerFlushChunk
+	}
 	for i := 0; i < 4; i++ {
 		b.flusher.chunks[i] = flushChunk{
 			chunkId:    0,
-			chunk:      make([]byte, 0, chunkSize),
-			h:          make([]uint64, 0, 128),
-			idx:        make([]uint64, 0, 128),
-			gen:        make([]uint64, 0, 128),
+			chunk:      getChunk(),
+			h:          make([]uint64, 0, itemsPerChunk),
+			idx:        make([]uint64, 0, itemsPerChunk),
+			gen:        make([]uint64, 0, itemsPerChunk),
 			size:       0,
 			cleanChunk: false,
 		}
@@ -440,12 +445,12 @@ func (b *bucket) cleanFlusher(f *flusher) {
 	}
 
 	for j := range f.chunks {
-		f.chunks[j].h = make([]uint64, 0, 128)
-		f.chunks[j].idx = make([]uint64, 0, 128)
+		f.chunks[j].h = f.chunks[j].h[:0]
+		f.chunks[j].idx = f.chunks[j].idx[:0]
 		f.chunks[j].chunk = f.chunks[j].chunk[:0]
 		f.chunks[j].size = 0
 		f.chunks[j].cleanChunk = false
-		f.chunks[j].gen = make([]uint64, 0, 128)
+		f.chunks[j].gen = f.chunks[j].gen[:0]
 	}
 	f.chunkSynced.Store(f.chunks)
 	f.spinlock.Unlock()
@@ -493,7 +498,7 @@ func (b *bucket) Reset() {
 	chunks := b.chunks
 	for i := range chunks {
 		putChunk(chunks[i])
-		chunks[i] = nil // getChunk()
+		chunks[i] = nil //
 	}
 	b.m = make(map[uint64]uint64)
 	b.idx.Store(0)
@@ -611,6 +616,7 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 	}
 }
 
+// todo: copy previos implementation
 func (b *bucket) setWithLock(k, v []byte, h uint64) {
 	atomic.AddUint64(&b.setCalls, 1)
 	if len(k) >= (1<<16) || len(v) >= (1<<16) {
