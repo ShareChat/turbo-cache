@@ -4,22 +4,12 @@
 package turbocache
 
 import (
-	"github.com/ShareChat/turbo-cache/internal/primeNumber"
 	"github.com/ShareChat/turbo-cache/spinlock"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 )
-
-type flushStruct struct {
-	kv         []byte
-	h          uint64
-	chunk      uint64
-	idx        uint64
-	gen        uint64
-	cleanChunk bool
-}
 
 type flusher struct {
 	count               int
@@ -44,60 +34,6 @@ type flushChunk struct {
 	gen        []uint64
 	size       uint64
 	cleanChunk bool
-}
-
-type flushChunkIndexItem struct {
-	flushChunk [7]int
-	h          [7]uint64
-	currentIdx [7]uint64
-}
-
-func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
-	b.setBuf = make(chan *insertValue, setBufSize)
-	b.stopWriting = make(chan *struct{})
-	b.flusher = &flusher{
-		count:               0,
-		idx:                 b.idx.Load(),
-		gen:                 b.gen,
-		currentChunkId:      b.idx.Load() / chunkSize,
-		currentFlushChunkId: 0,
-		totalChunkCount:     uint64(len(b.chunks)),
-		needClean:           false,
-	}
-	b.flusher.chunks = make([]flushChunk, 4)
-
-	itemsPerChunk := maxBatch
-	if initItemsPerFlushChunk < itemsPerChunk {
-		itemsPerChunk = initItemsPerFlushChunk
-	}
-	for i := 0; i < 4; i++ {
-		b.flusher.chunks[i] = flushChunk{
-			chunkId:    0,
-			chunk:      getChunk()[:0],
-			h:          make([]uint64, 0, itemsPerChunk),
-			idx:        make([]uint64, 0, itemsPerChunk),
-			gen:        make([]uint64, 0, itemsPerChunk),
-			size:       0,
-			cleanChunk: false,
-		}
-	}
-	b.flusher.chunkSynced.Store(b.flusher.chunks)
-	index := make([]flushChunkIndexItem, primeNumber.NextPrime(uint64(maxBatch)))
-	b.flusher.index.Store(index)
-	go func() {
-		b.randomDelay(flushInterval)
-		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
-		for {
-			select {
-			case i := <-b.setBuf:
-				b.onNewItem(i, maxBatch, flushInterval)
-			case _ = <-t:
-				b.onFlushTick(flushInterval)
-			case <-b.stopWriting:
-				return
-			}
-		}
-	}()
 }
 
 func (b *bucket) onFlushTick(flushInterval int64) {
@@ -158,17 +94,6 @@ func (b *bucket) onNewItem(i *insertValue, maxBatch int, flushInterval int64) {
 	if f.count >= maxBatch || (f.count > 0 && (time.Since(time.UnixMilli(b.latestTimestamp)).Milliseconds() >= flushInterval || forceFlush)) {
 		b.setBatch(f)
 		b.cleanFlusher(f)
-	}
-}
-
-func (i *flushChunkIndexItem) saveToIndex(h uint64, flushIdx uint64, chunk int) {
-	for j := range i.h {
-		if i.h[j] == 0 {
-			i.h[j] = h
-			i.currentIdx[j] = flushIdx
-			i.flushChunk[j] = chunk
-			break
-		}
 	}
 }
 
@@ -264,17 +189,6 @@ func (f *flusher) incrementIndexes(kvLength uint64) (idxNew uint64, newChunk boo
 		newChunk = true
 	}
 	return idxNew, newChunk
-}
-
-func (i *flushChunkIndexItem) exists(h uint64) bool {
-	for _, hv := range i.h {
-		if hv == h {
-			return true
-		} else if hv == 0 {
-			break
-		}
-	}
-	return false
 }
 
 var insertValuePool = &sync.Pool{New: func() any {

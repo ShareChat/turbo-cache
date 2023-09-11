@@ -5,9 +5,11 @@ package turbocache
 
 import (
 	"fmt"
+	"github.com/ShareChat/turbo-cache/internal/primeNumber"
 	xxhash "github.com/cespare/xxhash/v2"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const setBufSize = 128
@@ -310,6 +312,54 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 	}
 }
 
+func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
+	b.setBuf = make(chan *insertValue, setBufSize)
+	b.stopWriting = make(chan *struct{})
+	b.flusher = &flusher{
+		count:               0,
+		idx:                 b.idx.Load(),
+		gen:                 b.gen,
+		currentChunkId:      b.idx.Load() / chunkSize,
+		currentFlushChunkId: 0,
+		totalChunkCount:     uint64(len(b.chunks)),
+		needClean:           false,
+	}
+	b.flusher.chunks = make([]flushChunk, 4)
+
+	itemsPerChunk := maxBatch
+	if initItemsPerFlushChunk < itemsPerChunk {
+		itemsPerChunk = initItemsPerFlushChunk
+	}
+	for i := 0; i < 4; i++ {
+		b.flusher.chunks[i] = flushChunk{
+			chunkId:    0,
+			chunk:      getChunk()[:0],
+			h:          make([]uint64, 0, itemsPerChunk),
+			idx:        make([]uint64, 0, itemsPerChunk),
+			gen:        make([]uint64, 0, itemsPerChunk),
+			size:       0,
+			cleanChunk: false,
+		}
+	}
+	b.flusher.chunkSynced.Store(b.flusher.chunks)
+	index := make([]flushChunkIndexItem, primeNumber.NextPrime(uint64(maxBatch)))
+	b.flusher.index.Store(index)
+	go func() {
+		b.randomDelay(flushInterval)
+		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
+		for {
+			select {
+			case i := <-b.setBuf:
+				b.onNewItem(i, maxBatch, flushInterval)
+			case _ = <-t:
+				b.onFlushTick(flushInterval)
+			case <-b.stopWriting:
+				return
+			}
+		}
+	}()
+}
+
 func (b *bucket) Reset() {
 	b.mu.Lock()
 	chunks := b.chunks
@@ -499,7 +549,7 @@ func makeKvLenBuf(k []byte, v []byte) [4]byte {
 func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool, bool) {
 	atomic.AddUint64(&b.getCalls, 1)
 
-	bytes, found := b.tryFindInFlushBuffer(dst, k, h, returnDst)
+	bytes, found := b.flusher.tryFindInFlushIndex(dst, k, h, returnDst)
 	if found {
 		return bytes, found, true
 	}
@@ -547,47 +597,6 @@ end:
 		atomic.AddUint64(&b.misses, 1)
 	}
 	return dst, found, false
-}
-
-func (b *bucket) tryFindInFlushBuffer(dst []byte, k []byte, h uint64, returnDst bool) ([]byte, bool) {
-	if b.flusher == nil {
-		return dst, false
-	}
-
-	found := false
-	if !b.flusher.flushed.Load() {
-		index := b.flusher.index.Load().([]flushChunkIndexItem)
-		indexItem := (index)[h%uint64(len(index))]
-		for i := range indexItem.h {
-			if indexItem.h[i] == 0 {
-				break
-			} else if indexItem.h[i] == h {
-				if b.flusher.spinlock.TryRLock() {
-					index = b.flusher.index.Load().([]flushChunkIndexItem)
-					indexItem = (index)[h%uint64(len(index))]
-					if indexItem.h[i] == h {
-						chunkId := indexItem.flushChunk[i]
-						flushIdx := indexItem.currentIdx[i]
-						chunk := b.flusher.chunkSynced.Load().([]flushChunk)[chunkId]
-						kvLenBuf := chunk.chunk[flushIdx : flushIdx+kvLenBufSize]
-						keyLen := (uint64(kvLenBuf[0]) << 8) | uint64(kvLenBuf[1])
-						if keyLen == uint64(len(k)) && string(k) == string(chunk.chunk[flushIdx+kvLenBufSize:flushIdx+kvLenBufSize+keyLen]) {
-							if returnDst {
-								valLen := (uint64(kvLenBuf[2]) << 8) | uint64(kvLenBuf[3])
-								dst = append(dst, chunk.chunk[flushIdx+kvLenBufSize+keyLen:flushIdx+kvLenBufSize+keyLen+valLen]...)
-								found = true
-							}
-						}
-					}
-					b.flusher.spinlock.RUnlock()
-				}
-			}
-		}
-		if found {
-			return dst, found
-		}
-	}
-	return dst, false
 }
 
 func (b *bucket) Del(h uint64) {

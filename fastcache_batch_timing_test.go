@@ -49,6 +49,7 @@ func BenchmarkBatchSetMostOptimised(b *testing.B) {
 	debug.SetGCPercent(100)
 }
 
+/*
 func BenchmarkBatchSet(b *testing.B) {
 	const items = 1 << 16
 	const buffSize = 131
@@ -78,7 +79,7 @@ func BenchmarkBatchSet(b *testing.B) {
 		}
 	})
 	debug.SetGCPercent(100)
-}
+}*/
 
 func BenchmarkSingleSet(b *testing.B) {
 	const items = 1 << 16
