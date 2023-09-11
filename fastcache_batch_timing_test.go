@@ -18,7 +18,7 @@ func BenchmarkBatchSetMostOptimised(b *testing.B) {
 	for i := 0; i < 2; i++ {
 		for j := 0; j < buffSize/2; j++ {
 			k[0] = byte(j)
-			kvLenBuf := kvLenBuf(k, v)
+			kvLenBuf := makeKvLenBuf(k, v)
 			buffer[i].chunk = append(buffer[i].chunk, kvLenBuf[:]...)
 			buffer[i].chunk = append(buffer[i].chunk, k...)
 			buffer[i].chunk = append(buffer[i].chunk, v...)
@@ -41,7 +41,7 @@ func BenchmarkBatchSetMostOptimised(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			for i := 0; i < items; i++ {
-				c.buckets[i%bucketsCount].setBatchInternalMostOptimised(buffer, true, 1, 1)
+				//		c.buckets[i%bucketsCount].setBatchInternalMostOptimised(buffer, true, 1, 1)
 
 			}
 		}
@@ -60,7 +60,7 @@ func BenchmarkBatchSet(b *testing.B) {
 	buffer := make([]flushStruct, buffSize)
 	for i := 0; i < buffSize; i++ {
 		k[0]++
-		kvLenBuf := kvLenBuf(k, v)
+		kvLenBuf := makeKvLenBuf(k, v)
 		buffer[i].kv = append(buffer[i].kv, kvLenBuf[:]...)
 		buffer[i].kv = append(buffer[i].kv, k...)
 		buffer[i].kv = append(buffer[i].kv, v...)

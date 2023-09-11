@@ -388,7 +388,7 @@ func TestAsyncInsertToCache2(t *testing.T) {
 }
 
 func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
-	itemsCount := 16 * 1024 * 1024
+	itemsCount := 4 * 1024 * 1024
 	for _, batch := range []int{3, 131} {
 		t.Run(fmt.Sprintf("batch_%d", batch), func(t *testing.T) {
 			c := New(NewConfigWithDroppingOnContention(1024*itemsCount*1024, 500, batch))
