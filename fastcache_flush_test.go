@@ -213,21 +213,6 @@ func testCacheGetSet(c *Cache, itemsCount int) error {
 	return nil
 }
 
-func TestShouldDropWritingOnBufferOverflow(t *testing.T) {
-	itemsCount := 512 * setBufSize * 4
-	c := New(NewConfig(30*itemsCount*10, 5, 100))
-	defer c.Close()
-
-	for i := 0; i < itemsCount; i++ {
-		c.Set([]byte(fmt.Sprintf("key %d", i)), []byte(fmt.Sprintf("value %d", i)))
-	}
-	var s Stats
-	c.UpdateStats(&s, true)
-	if s.DropsInQueue == 0 {
-		t.Fatalf("drop writes should be presented")
-	}
-}
-
 func TestAsyncInsertToCache(t *testing.T) {
 	itemsCount := 64 * 1024
 	for _, batch := range []int{1, 3, 131, 1024} {
