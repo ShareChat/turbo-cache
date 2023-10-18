@@ -4,7 +4,7 @@
 package turbocache
 
 import (
-	"github.com/ShareChat/turbo-cache/spinlock"
+	"github.com/ShareChat/turbo-cache/internal/spinlock"
 	"math/rand"
 	"sync"
 	"sync/atomic"
