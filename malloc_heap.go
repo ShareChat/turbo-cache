@@ -10,3 +10,7 @@ func getChunk() []byte {
 func putChunk(chunk []byte) {
 	// No-op.
 }
+
+func getChunkArray() *[chunkSize]byte {
+	return make([]byte, chunkSize)
+}
