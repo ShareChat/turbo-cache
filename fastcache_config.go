@@ -10,7 +10,7 @@ type Config struct {
 	flushIntervalMillis int64
 	//max batch size for writing in chunks. batch size 1 make turbo cache to sync cache
 	maxWriteBatch int
-	//size of the accumaling
+	//count of the accumulating buffers (chunks) before flush. Every flush chunks has 64KB
 	flushChunkCount int
 }
 
