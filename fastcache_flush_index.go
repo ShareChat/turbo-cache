@@ -6,8 +6,11 @@ package turbocache
 import "sync/atomic"
 
 type flushChunkIndexItem struct {
+	//flush chunk number
 	flushChunk [7]int32
-	h          [7]uint64
+	// key hash value
+	h [7]uint64
+	//index in flush chunk
 	currentIdx [7]uint64
 }
 

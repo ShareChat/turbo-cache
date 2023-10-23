@@ -6,8 +6,10 @@ import (
 	"testing"
 )
 
+//todo: write proper tests on overflow
+
 func TestGenerationOverflow(t *testing.T) {
-	c := New(newSyncWriteConfig(1)) // each bucket has 64 *1024 bytes capacity
+	c := New(NewConfig(1, 1, 1, 1)) // each bucket has 64 *1024 bytes capacity
 
 	// Initial generation is 1
 	genVal(t, c, 1)

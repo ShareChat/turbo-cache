@@ -17,7 +17,7 @@ const cacheDelay = 100
 func TestCacheAsync(t *testing.T) {
 	for _, batch := range []int{1, 3, 256, 1024} {
 		t.Run(fmt.Sprintf("batch_%d", batch), func(t *testing.T) {
-			c := New(NewConfig(bucketsCount*chunkSize*1.5, defaultFlushInterval, batch))
+			c := New(NewConfig(bucketsCount*chunkSize*1.5, defaultFlushInterval, batch, 1))
 			defer c.Close()
 
 			calls := uint64(100000)
@@ -416,5 +416,5 @@ func (c *Cache) getBigWithExpectedValue(dst, k []byte, expected []byte) []byte {
 }
 
 func newCacheConfigWithDefaultParams(maxBytes int) *Config {
-	return NewConfig(maxBytes, defaultFlushInterval, defaultBatchWriteSize)
+	return NewConfig(maxBytes, defaultFlushInterval, defaultBatchWriteSize, 1)
 }

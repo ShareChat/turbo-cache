@@ -149,11 +149,10 @@ func New(config *Config) *Cache {
 	}
 
 	var c Cache
-	c.syncWrite = config.syncWrite
+	c.syncWrite = config.maxBytes <= 1 && config.flushIntervalMillis <= 0
 	maxBucketBytes := uint64((config.maxBytes + bucketsCount - 1) / bucketsCount)
 	for i := range c.buckets[:] {
-		c.buckets[i].Init(maxBucketBytes, config.flushIntervalMillis, config.maxWriteBatch, config.syncWrite)
-		c.buckets[i].dropWriting = config.dropWriteOnHighContention
+		c.buckets[i].Init(maxBucketBytes, config.flushIntervalMillis, config.maxWriteBatch, config.flushChunkCount)
 	}
 	return &c
 }
@@ -272,7 +271,6 @@ type bucket struct {
 
 	setBuf      chan *queuedStruct
 	stopWriting chan *struct{}
-	dropWriting bool
 	// m maps hash(k) to idx of (k, v) pair in chunks.
 	m       map[uint64]uint64
 	flusher *flusher
@@ -295,7 +293,7 @@ type bucket struct {
 	latestTimestamp int64
 }
 
-func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWrite bool) {
+func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, flushChunks int) {
 	if maxBytes == 0 {
 		panic(fmt.Errorf("maxBytes cannot be zero"))
 	}
@@ -307,12 +305,12 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 	b.m = make(map[uint64]uint64)
 	b.Reset()
 
-	b.startProcessingWriteQueue(flushInterval, maxBatch)
+	b.startProcessingWriteQueue(flushInterval, maxBatch, flushChunks)
 }
 
-func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
+func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int, flushChunks int) {
 	b.setBuf = make(chan *queuedStruct, setBufSize)
-	b.initFlusher(maxBatch)
+	b.initFlusher(maxBatch, flushChunks)
 	go func() {
 		maxDelay := flushInterval
 		if maxDelay > 5 {
@@ -334,7 +332,7 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
 	}()
 }
 
-func (b *bucket) initFlusher(maxBatch int) {
+func (b *bucket) initFlusher(maxBatch int, chunks int) {
 	b.flusher = &flusher{
 		count:               0,
 		idx:                 b.idx.Load(),
@@ -350,7 +348,8 @@ func (b *bucket) initFlusher(maxBatch int) {
 	if initItemsPerFlushChunk < itemsPerChunk {
 		itemsPerChunk = initItemsPerFlushChunk
 	}
-	for i := 0; i < 4; i++ {
+
+	for i := 0; i < chunks; i++ {
 		b.flusher.chunks[i] = flushChunk{
 			chunkId:    0,
 			chunk:      *getChunkArray(),
@@ -474,15 +473,11 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 	} else {
 		iv := getQueuedStruct(k, v, h)
 
-		if b.dropWriting {
-			select {
-			case b.setBuf <- iv:
-				return
-			default:
-				atomic.AddUint64(&b.dropsInQueue, 1)
-			}
-		} else {
-			b.setBuf <- iv
+		select {
+		case b.setBuf <- iv:
+			return
+		default:
+			atomic.AddUint64(&b.dropsInQueue, 1)
 		}
 
 	}

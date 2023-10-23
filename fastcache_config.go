@@ -4,25 +4,21 @@
 package turbocache
 
 type Config struct {
-	maxBytes                  int
-	flushIntervalMillis       int64
-	maxWriteBatch             int
-	syncWrite                 bool
-	dropWriteOnHighContention bool
+	//max bytes for storing keys in chunks
+	maxBytes int
+	// flush intervals to writing keys to the chunks
+	flushIntervalMillis int64
+	//max batch size for writing in chunks. batch size 1 make turbo cache to sync cache
+	maxWriteBatch int
+	//size of the accumaling
+	flushChunkCount int
 }
 
-func newSyncWriteConfig(maxBytes int) *Config {
+func NewConfig(maxBytes int, flushInterval int64, maxWriteBatch int, flushChunks int) *Config {
 	return &Config{
-		maxBytes:  maxBytes,
-		syncWrite: true,
-	}
-}
-
-func NewConfig(maxBytes int, flushInterval int64, maxWriteBatch int) *Config {
-	return &Config{
-		maxBytes:                  maxBytes,
-		flushIntervalMillis:       flushInterval,
-		maxWriteBatch:             maxWriteBatch,
-		dropWriteOnHighContention: true,
+		maxBytes:            maxBytes,
+		flushIntervalMillis: flushInterval,
+		maxWriteBatch:       maxWriteBatch,
+		flushChunkCount:     flushChunks,
 	}
 }
