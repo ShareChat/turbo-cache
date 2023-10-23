@@ -12,5 +12,6 @@ func putChunk(chunk []byte) {
 }
 
 func getChunkArray() *[chunkSize]byte {
-	return make([]byte, chunkSize)
+	var result [chunkSize]byte
+	return &result
 }
