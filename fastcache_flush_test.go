@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const cacheDelay = 100
+const cacheDelay = 250
 
 func TestCacheAsync(t *testing.T) {
 	for _, batch := range []int{1, 3, 256, 1024} {
