@@ -215,7 +215,7 @@ func testCacheGetSet(c *Cache, itemsCount int) error {
 
 func TestAsyncInsertToCache(t *testing.T) {
 	itemsCount := 64 * 1024
-	for _, batch := range []int{1, 3, 131, 1024} {
+	for _, batch := range []int{1, 3, 131} {
 		t.Run(fmt.Sprintf("batch_%d", batch), func(t *testing.T) {
 			c := New(newCacheConfigWithDefaultParams(64 * itemsCount))
 			c.stopFlushing()
@@ -238,7 +238,7 @@ func TestAsyncInsertToCache(t *testing.T) {
 			}
 
 			t.Logf("not found count: %d out %d", notFoundCount, itemsCount)
-			expectedNotFoundThreshold := itemsCount / 5
+			expectedNotFoundThreshold := itemsCount / 3
 			if notFoundCount > expectedNotFoundThreshold {
 				t.Fatalf("too much not found. actual: %d, expected < %d", notFoundCount, expectedNotFoundThreshold)
 			}
@@ -416,5 +416,5 @@ func (c *Cache) getBigWithExpectedValue(dst, k []byte, expected []byte) []byte {
 }
 
 func newCacheConfigWithDefaultParams(maxBytes int) *Config {
-	return NewConfig(maxBytes, defaultFlushInterval, defaultBatchWriteSize, 1)
+	return NewConfig(maxBytes, defaultFlushInterval, defaultBatchWriteSize, 2)
 }

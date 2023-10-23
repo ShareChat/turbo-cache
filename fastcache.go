@@ -152,7 +152,7 @@ func New(config *Config) *Cache {
 	c.syncWrite = config.maxBytes <= 1 && config.flushIntervalMillis <= 0
 	maxBucketBytes := uint64((config.maxBytes + bucketsCount - 1) / bucketsCount)
 	for i := range c.buckets[:] {
-		c.buckets[i].Init(maxBucketBytes, config.flushIntervalMillis, config.maxWriteBatch, config.flushChunkCount)
+		c.buckets[i].Init(maxBucketBytes, config.flushIntervalMillis, config.maxWriteBatch, config.flushChunkCount, c.syncWrite)
 	}
 	return &c
 }
@@ -293,7 +293,7 @@ type bucket struct {
 	latestTimestamp int64
 }
 
-func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, flushChunks int) {
+func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, flushChunks int, syncWrite bool) {
 	if maxBytes == 0 {
 		panic(fmt.Errorf("maxBytes cannot be zero"))
 	}
@@ -304,8 +304,10 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, flushC
 	b.chunks = make([][]byte, maxChunks)
 	b.m = make(map[uint64]uint64)
 	b.Reset()
+	if !syncWrite {
+		b.startProcessingWriteQueue(flushInterval, maxBatch, flushChunks)
+	}
 
-	b.startProcessingWriteQueue(flushInterval, maxBatch, flushChunks)
 }
 
 func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int, flushChunks int) {
