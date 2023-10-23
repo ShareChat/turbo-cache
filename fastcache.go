@@ -352,9 +352,10 @@ func (b *bucket) initFlusher(maxBatch int, chunks int) {
 	}
 
 	for i := 0; i < chunks; i++ {
+		array := getChunkArray()
 		b.flusher.chunks[i] = flushChunk{
 			chunkId:    0,
-			chunk:      *getChunkArray(),
+			chunk:      *array,
 			h:          make([]uint64, 0, itemsPerChunk),
 			idx:        make([]uint64, 0, itemsPerChunk),
 			gen:        make([]uint64, 0, itemsPerChunk),
