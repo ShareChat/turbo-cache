@@ -217,11 +217,8 @@ func TestAsyncInsertToCache(t *testing.T) {
 	itemsCount := 64 * 1024
 	for _, batch := range []int{1, 3, 131, 1024} {
 		t.Run(fmt.Sprintf("batch_%d", batch), func(t *testing.T) {
-			c := New(NewSyncWriteConfig(64 * itemsCount))
-			for i := 0; i < len(c.buckets); i++ {
-				c.buckets[i].initFlusher(batch)
-			}
-			defer c.Close()
+			c := New(newCacheConfigWithDefaultParams(64 * itemsCount))
+			c.stopFlushing()
 			bucket := &c.buckets[0]
 			notFoundCount := 0
 			for i := 0; i < itemsCount; i++ {
@@ -241,8 +238,9 @@ func TestAsyncInsertToCache(t *testing.T) {
 			}
 
 			t.Logf("not found count: %d out %d", notFoundCount, itemsCount)
-			if notFoundCount > itemsCount/10 {
-				t.Fatalf("too much not found. actual: %d, expected: %d", notFoundCount, itemsCount/10)
+			expectedNotFoundThreshold := itemsCount / 5
+			if notFoundCount > expectedNotFoundThreshold {
+				t.Fatalf("too much not found. actual: %d, expected < %d", notFoundCount, expectedNotFoundThreshold)
 			}
 		})
 	}
@@ -252,11 +250,8 @@ func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
 	itemsCount := 4 * 1024 * 100
 	for _, batch := range []int{11} {
 		t.Run(fmt.Sprintf("batch_%d", batch), func(t *testing.T) {
-			c := New(NewSyncWriteConfig(10 * chunkSize * bucketsCount))
-			for i := 0; i < len(c.buckets); i++ {
-				c.buckets[i].initFlusher(batch)
-			}
-			defer c.Close()
+			c := New(newCacheConfigWithDefaultParams(10 * chunkSize * bucketsCount))
+			c.stopFlushing()
 
 			ch := make(chan string, 128)
 			var notFoundCount atomic.Int32

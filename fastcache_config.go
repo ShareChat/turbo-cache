@@ -11,7 +11,7 @@ type Config struct {
 	dropWriteOnHighContention bool
 }
 
-func NewSyncWriteConfig(maxBytes int) *Config {
+func newSyncWriteConfig(maxBytes int) *Config {
 	return &Config{
 		maxBytes:  maxBytes,
 		syncWrite: true,

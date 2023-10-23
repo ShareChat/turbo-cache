@@ -2,6 +2,8 @@ package primeNumber
 
 import "math/big"
 
+//copied for single flight
+
 func NextPrime(n uint64) uint64 {
 	switch n {
 	case 0, 1:

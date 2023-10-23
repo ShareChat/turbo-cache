@@ -234,8 +234,12 @@ func (c *Cache) Reset() {
 
 func (c *Cache) Close() {
 	c.Reset()
-	if !c.syncWrite {
-		for i := range c.buckets[:] {
+	c.stopFlushing()
+}
+
+func (c *Cache) stopFlushing() {
+	for i := range c.buckets[:] {
+		if c.buckets[i].setBuf != nil {
 			close(c.buckets[i].setBuf)
 		}
 	}
@@ -303,9 +307,7 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, syncWr
 	b.m = make(map[uint64]uint64)
 	b.Reset()
 
-	if !syncWrite {
-		b.startProcessingWriteQueue(flushInterval, maxBatch)
-	}
+	b.startProcessingWriteQueue(flushInterval, maxBatch)
 }
 
 func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int) {
