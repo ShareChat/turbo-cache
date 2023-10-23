@@ -557,11 +557,8 @@ func makeKvLenBuf(k []byte, v []byte) [4]byte {
 
 func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool, bool) {
 	atomic.AddUint64(&b.getCalls, 1)
+	found := false
 
-	bytes, found := b.flusher.tryFindInFlushIndex(dst, k, h, returnDst)
-	if found {
-		return bytes, found, true
-	}
 	chunks := b.chunks
 	b.mu.RLock()
 	currentIdx := b.idx.Load()
@@ -603,7 +600,12 @@ func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool, boo
 end:
 	b.mu.RUnlock()
 	if !found {
-		atomic.AddUint64(&b.misses, 1)
+		bytes, found := b.flusher.tryFindInFlushIndex(dst, k, h, returnDst)
+		if found {
+			return bytes, found, true
+		} else {
+			atomic.AddUint64(&b.misses, 1)
+		}
 	}
 	return dst, found, false
 }
