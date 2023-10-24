@@ -62,12 +62,11 @@ func (b *bucket) onNewItem(i *queuedStruct, maxBatch int, flushInterval int64) {
 			flushChunk := &f.chunks[f.currentFlushChunkId]
 
 			lenBuf := makeKvLenBuf(i.K, i.V)
-			//f.spinlock.Lock()
+
 			copy(flushChunk.chunk[flushChunk.size:], lenBuf[:])
 			copy(flushChunk.chunk[flushChunk.size+4:], i.K)
 			copy(flushChunk.chunk[flushChunk.size+4+uint64(len(i.K)):], i.V)
 
-			//f.spinlock.Unlock()
 			flushChunk.h = append(flushChunk.h, i.h)
 			flushChunk.idx = append(flushChunk.idx, f.idx)
 			flushChunk.gen = append(flushChunk.gen, f.gen)
