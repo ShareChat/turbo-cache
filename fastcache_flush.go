@@ -22,7 +22,7 @@ type flusher struct {
 	currentFlushChunkId int32
 	totalChunkCount     uint64
 	needClean           bool
-	flushed             atomic.Bool
+	flushing            atomic.Bool
 	spinlock            spinlock.RWMutex
 }
 
@@ -136,7 +136,7 @@ func (b *bucket) setBatch(f *flusher) {
 
 func (b *bucket) cleanFlusher(f *flusher) {
 	index := b.flusher.index.Load().([]flushChunkIndexItem)
-	f.flushed.Store(true)
+	f.flushing.Store(true)
 	f.spinlock.Lock()
 
 	for i := 0; i < len(index); i++ {
@@ -156,7 +156,7 @@ func (b *bucket) cleanFlusher(f *flusher) {
 	}
 	f.chunkSynced.Store(f.chunks)
 	f.spinlock.Unlock()
-	f.flushed.Store(false)
+	f.flushing.Store(false)
 
 	f.currentFlushChunkId = 0
 	f.needClean = false

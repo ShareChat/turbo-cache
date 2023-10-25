@@ -42,7 +42,7 @@ func (f *flusher) tryFindInFlushIndex(dst []byte, k []byte, h uint64, returnDst 
 	}
 
 	found := false
-	if !f.flushed.Load() {
+	if !f.flushing.Load() {
 		index := f.index.Load().([]flushChunkIndexItem)
 		indexPoint := h % uint64(len(index))
 		for i := 0; i < len(index[indexPoint].h); i++ {
