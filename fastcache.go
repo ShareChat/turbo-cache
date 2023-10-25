@@ -365,7 +365,6 @@ func (b *bucket) initFlusher(maxBatch int, chunks int) {
 	}
 	b.flusher.chunkSynced.Store(b.flusher.chunks)
 	b.flusher.index = make([]flushChunkIndexItem, primeNumber.NextPrime(uint64(maxBatch)))
-	b.flusher.indexSynced.Store(b.flusher.index)
 }
 
 func (b *bucket) Reset() {

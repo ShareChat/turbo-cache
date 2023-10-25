@@ -43,7 +43,7 @@ func (f *flusher) tryFindInFlushIndex(dst []byte, k []byte, h uint64, returnDst 
 
 	found := false
 	if !f.flushing.Load() {
-		index := f.indexSynced.Load().([]flushChunkIndexItem)
+		index := f.index
 		indexPoint := h % uint64(len(index))
 		for i := 0; i < len(index[indexPoint].h); i++ {
 			hashValue := atomic.LoadUint64(&index[indexPoint].h[i])
@@ -51,7 +51,7 @@ func (f *flusher) tryFindInFlushIndex(dst []byte, k []byte, h uint64, returnDst 
 				break
 			} else if hashValue == h {
 				if f.spinlock.TryRLock() {
-					index = f.indexSynced.Load().([]flushChunkIndexItem)
+					index = f.index
 					if atomic.LoadUint64(&index[indexPoint].h[i]) == h {
 						chunkId := atomic.LoadInt32(&index[indexPoint].flushChunk[i])
 						flushIdx := atomic.LoadUint64(&index[indexPoint].currentIdx[i])

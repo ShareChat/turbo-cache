@@ -15,7 +15,6 @@ type flusher struct {
 	count               int
 	chunks              []flushChunk
 	chunkSynced         atomic.Value
-	indexSynced         atomic.Value
 	index               []flushChunkIndexItem
 	idx                 uint64
 	gen                 uint64
@@ -84,8 +83,6 @@ func (b *bucket) onNewItem(i *queuedStruct, maxBatch int, flushInterval int64) {
 				}
 			}
 
-			b.flusher.indexSynced.Store(index)
-
 			flushChunk.size += kvLength
 			f.idx = idxNew
 			f.count++
@@ -151,7 +148,6 @@ func (b *bucket) cleanFlusher(f *flusher) {
 			}
 		}
 	}
-	b.flusher.indexSynced.Store(index)
 	for j := range f.chunks {
 		f.chunks[j].clean()
 	}
