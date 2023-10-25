@@ -66,6 +66,7 @@ func (b *bucket) onNewItem(i *queuedStruct, maxBatch int, flushInterval int64) {
 			copy(flushChunk.chunk[flushChunk.size:], lenBuf[:])
 			copy(flushChunk.chunk[flushChunk.size+4:], i.K)
 			copy(flushChunk.chunk[flushChunk.size+4+uint64(len(i.K)):], i.V)
+			b.flusher.chunkSynced.Store(b.flusher.chunks)
 
 			flushChunk.h = append(flushChunk.h, i.h)
 			flushChunk.idx = append(flushChunk.idx, f.idx)
@@ -90,7 +91,6 @@ func (b *bucket) onNewItem(i *queuedStruct, maxBatch int, flushInterval int64) {
 			if b.latestTimestamp == 0 {
 				b.latestTimestamp = time.Now().UnixMilli()
 			}
-			b.flusher.chunkSynced.Store(b.flusher.chunks)
 			atomic.AddUint64(&b.writeBufferSize, 1)
 		} else {
 			atomic.AddUint64(&b.droppedWrites, 1)
