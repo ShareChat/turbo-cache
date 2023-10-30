@@ -10,23 +10,37 @@ import (
 const defaultFlushInterval = 5000
 const defaultBatchWriteSize = 50
 
+func writeKeys(c *Cache, count int, k []byte, v []byte) {
+	for i := 0; i < count; i++ {
+		k[0]++
+		if k[0] == 0 {
+			k[1]++
+		}
+		c.Set(k, v)
+	}
+}
+
+func writeKeysFastCache(c *fastcache.Cache, count int, k []byte, v []byte) {
+	for i := 0; i < count; i++ {
+		k[0]++
+		if k[0] == 0 {
+			k[1]++
+		}
+		c.Set(k, v)
+	}
+}
+
 func BenchmarkCacheSet(b *testing.B) {
 	const items = 1 << 20
 	c := New(newCacheConfigBenchmarkParams(12 * items))
 	defer c.Close()
+
+	writeKeys(c, items, []byte("\x00\x00\x00\x00"), []byte("xyza"))
 	b.ReportAllocs()
 	b.SetBytes(items)
 	b.RunParallel(func(pb *testing.PB) {
-		k := []byte("\x00\x00\x00\x00")
-		v := []byte("xyza")
 		for pb.Next() {
-			for i := 0; i < items; i++ {
-				k[0]++
-				if k[0] == 0 {
-					k[1]++
-				}
-				c.Set(k, v)
-			}
+			writeKeys(c, items, []byte("\x00\x00\x00\x00"), []byte("xyza"))
 		}
 	})
 }
@@ -35,19 +49,12 @@ func BenchmarkFastCacheCacheSet(b *testing.B) {
 	const items = 1 << 20
 	c := fastcache.New(12 * items)
 	defer c.Reset()
+	writeKeysFastCache(c, items, []byte("\x00\x00\x00\x00"), []byte("xyza"))
 	b.ReportAllocs()
 	b.SetBytes(items)
 	b.RunParallel(func(pb *testing.PB) {
-		k := []byte("\x00\x00\x00\x00")
-		v := []byte("xyza")
 		for pb.Next() {
-			for i := 0; i < items; i++ {
-				k[0]++
-				if k[0] == 0 {
-					k[1]++
-				}
-				c.Set(k, v)
-			}
+			writeKeysFastCache(c, items, []byte("\x00\x00\x00\x00"), []byte("xyza"))
 		}
 	})
 }
@@ -118,6 +125,7 @@ func BenchmarkCacheSetGet(b *testing.B) {
 	const items = 1 << 16
 	c := New(newCacheConfigBenchmarkParams(12 * items))
 	defer c.Close()
+	writeKeys(c, items, []byte("\x00\x00\x00\x00"), []byte("xyza"))
 	b.ReportAllocs()
 	b.SetBytes(2 * items)
 	b.RunParallel(func(pb *testing.PB) {
@@ -147,6 +155,7 @@ func BenchmarkFastCacheCacheSetGet(b *testing.B) {
 	const items = 1 << 16
 	c := fastcache.New(12 * items)
 	defer c.Reset()
+	writeKeysFastCache(c, items, []byte("\x00\x00\x00\x00"), []byte("xyza"))
 	b.ReportAllocs()
 	b.SetBytes(2 * items)
 	b.RunParallel(func(pb *testing.PB) {
