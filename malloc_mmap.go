@@ -1,5 +1,4 @@
 //go:build !appengine && !windows
-// +build !appengine,!windows
 
 package turbocache
 

@@ -1,7 +1,7 @@
 package turbocache
 
 import (
-	xxhash "github.com/cespare/xxhash/v2"
+	"github.com/cespare/xxhash/v2"
 	"sync"
 	"sync/atomic"
 )
@@ -110,7 +110,7 @@ func (c *Cache) GetBig(dst, k []byte) (r []byte) {
 	var i uint64
 	for uint64(len(dst)-dstLen) < valueLen {
 		subkey.B = marshalUint64(subkey.B[:0], valueHash)
-		subkey.B = marshalUint64(subkey.B, uint64(i))
+		subkey.B = marshalUint64(subkey.B, i)
 		i++
 		dstNew := c.Get(dst, subkey.B)
 		if len(dstNew) == len(dst) {

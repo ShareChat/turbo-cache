@@ -36,7 +36,7 @@ func (rw *RWMutex) RLock() {
 	}
 
 	// Otherwise we have to wait until the write bits become unset.
-	// Afterwards the RWMutex is in read mode.
+	// Afterward the RWMutex is in read mode.
 	for {
 		if state := atomic.LoadUint32(&rw.state); state&rwmutexWrite == 0 {
 			return

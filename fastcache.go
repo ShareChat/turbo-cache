@@ -1,12 +1,10 @@
-// Package fastcache implements fast in-memory cache.
-//
-// The package has been extracted from https://victoriametrics.com/
+// Package turbocache implements fast in-memory cache.
 package turbocache
 
 import (
 	"fmt"
 	"github.com/ShareChat/turbo-cache/internal/primeNumber"
-	xxhash "github.com/cespare/xxhash/v2"
+	"github.com/cespare/xxhash/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -269,8 +267,7 @@ type bucket struct {
 	// It consists of 64KB chunks.
 	chunks [][]byte
 
-	setBuf      chan *queuedStruct
-	stopWriting chan *struct{}
+	setBuf chan *queuedStruct
 	// m maps hash(k) to idx of (k, v) pair in chunks.
 	m       map[uint64]uint64
 	flusher *flusher
@@ -429,41 +426,6 @@ func (b *bucket) UpdateStats(s *Stats, details bool) {
 	s.MaxBytesSize += uint64(len(b.chunks)) * chunkSize
 	b.mu.RUnlock()
 	s.BytesSize += bytesSize
-}
-
-func (b *bucket) set(kv []byte, h uint64, idx uint64, chunkIdx uint64, needClean bool) (newNeedClean bool, newIdx uint64, newChunkId uint64) {
-	chunks := b.chunks
-	idxNew := idx + uint64(len(kv))
-	chunkIdxNew := idxNew / chunkSize
-	if chunkIdxNew > chunkIdx {
-		if chunkIdxNew >= uint64(len(chunks)) {
-			idx = 0
-			idxNew = uint64(len(kv))
-			chunkIdx = 0
-			b.gen++
-			if b.gen&((1<<genSizeBits)-1) == 0 {
-				b.gen++
-			}
-			needClean = true
-		} else {
-			idx = chunkIdxNew * chunkSize
-			idxNew = idx + uint64(len(kv))
-			chunkIdx = chunkIdxNew
-		}
-		chunks[chunkIdx] = chunks[chunkIdx][:0]
-	}
-
-	chunk := chunks[chunkIdx]
-	if chunk == nil {
-		chunk = getChunk()[:0]
-	}
-
-	chunk = append(chunk, kv...)
-
-	chunks[chunkIdx] = chunk
-	b.m[h] = idx | (b.gen << bucketSizeBits)
-
-	return needClean, idxNew, chunkIdx
 }
 
 func (b *bucket) Set(k, v []byte, h uint64, sync bool) {

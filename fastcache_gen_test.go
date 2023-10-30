@@ -64,7 +64,7 @@ func TestGenerationOverflow(t *testing.T) {
 	// _very large_ generation value and appears to be from the future
 	getVal(t, c, key2, bigVal2)
 
-	// This Set creates an index where `(b.gen << bucketSizeBits)>>bucketSizeBits)==0`
+	// This Set creates an index where `(b.gen << bucketSizeBits)>>bucketSizeBits==0`
 	// The value is in the cache but is unreadable by Get
 	c.Set(key2, bigVal2)
 	// Ensure generations are working as we expect

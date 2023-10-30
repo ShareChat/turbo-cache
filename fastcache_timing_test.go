@@ -309,7 +309,7 @@ func BenchmarkSyncMapGet(b *testing.B) {
 					k[1]++
 				}
 				vv, ok := m.Load(string(k))
-				if !ok || vv.(string) != string(v) {
+				if !ok || vv.(string) != v {
 					panic(fmt.Errorf("BUG: unexpected value; got %q; want %q", vv, v))
 				}
 			}
@@ -339,7 +339,7 @@ func BenchmarkSyncMapSetGet(b *testing.B) {
 					k[1]++
 				}
 				vv, ok := m.Load(string(k))
-				if !ok || vv.(string) != string(v) {
+				if !ok || vv.(string) != v {
 					panic(fmt.Errorf("BUG: unexpected value; got %q; want %q", vv, v))
 				}
 			}
