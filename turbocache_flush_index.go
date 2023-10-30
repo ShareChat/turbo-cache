@@ -42,7 +42,7 @@ func (f *flusher) tryFindInFlushIndex(dst []byte, k []byte, h uint64, returnDst 
 					if atomic.LoadUint64(&index[indexPoint].h[i]) == h {
 						chunkId := atomic.LoadInt32(&index[indexPoint].flushChunk[i])
 						flushIdx := atomic.LoadUint64(&index[indexPoint].currentIdx[i])
-						chunks := f.chunkSynced.Load().([]flushChunk)
+						chunks := f.chunks
 						kvLenBuf := chunks[chunkId].chunk[flushIdx : flushIdx+kvLenBufSize]
 						keyLen := (uint64(kvLenBuf[0]) << 8) | uint64(kvLenBuf[1])
 						if keyLen == uint64(len(k)) && string(k) == string(chunks[chunkId].chunk[flushIdx+kvLenBufSize:flushIdx+kvLenBufSize+keyLen]) {

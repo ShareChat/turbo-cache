@@ -12,7 +12,6 @@ import (
 type flusher struct {
 	count               int
 	chunks              []flushChunk
-	chunkSynced         atomic.Value
 	index               []flushChunkIndexItem
 	idx                 uint64
 	gen                 uint64
@@ -64,7 +63,6 @@ func (b *bucket) onNewItem(i *queuedStruct, maxBatch int, flushInterval int64) {
 			copy(flushChunk.chunk[flushChunk.size:], lenBuf[:])
 			copy(flushChunk.chunk[flushChunk.size+4:], i.K)
 			copy(flushChunk.chunk[flushChunk.size+4+uint64(len(i.K)):], i.V)
-			b.flusher.chunkSynced.Store(b.flusher.chunks)
 
 			flushChunk.h = append(flushChunk.h, i.h)
 			flushChunk.idx = append(flushChunk.idx, f.idx)
@@ -137,10 +135,10 @@ func (b *bucket) cleanFlusher(f *flusher) {
 
 	for i := 0; i < len(index); i++ {
 		for j := range index[i].h {
-			if atomic.LoadUint64(&index[i].h[j]) != 0 {
-				atomic.StoreUint64(&index[i].currentIdx[j], 0)
-				atomic.StoreInt32(&index[i].flushChunk[j], 0)
-				atomic.StoreUint64(&index[i].h[j], 0)
+			if index[i].h[j] != 0 {
+				index[i].currentIdx[j] = 0
+				index[i].flushChunk[j] = 0
+				index[i].h[j] = 0
 			} else {
 				break
 			}
@@ -149,7 +147,6 @@ func (b *bucket) cleanFlusher(f *flusher) {
 	for j := range f.chunks {
 		f.chunks[j].clean()
 	}
-	f.chunkSynced.Store(f.chunks)
 	f.spinlock.Unlock()
 	f.flushing.Store(false)
 
