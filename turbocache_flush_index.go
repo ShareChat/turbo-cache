@@ -12,17 +12,6 @@ type flushChunkIndexItem struct {
 	currentIdx [7]uint64
 }
 
-func (i *flushChunkIndexItem) saveToIndex(h uint64, flushIdx uint64, chunk int32) {
-	for j := range i.h {
-		if atomic.LoadUint64(&i.h[j]) == 0 {
-			atomic.StoreUint64(&i.currentIdx[j], flushIdx)
-			atomic.StoreInt32(&i.flushChunk[j], chunk)
-			atomic.StoreUint64(&i.h[j], h)
-			break
-		}
-	}
-}
-
 func (i *flushChunkIndexItem) exists(h uint64) bool {
 	for _, hv := range i.h {
 		if hv == h {
