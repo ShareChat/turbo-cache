@@ -13,7 +13,8 @@ import (
 // structures; the zero value for a RWMutex is
 // an unlocked mutex.
 type RWMutex struct {
-	state uint32
+	tryLocking uint32
+	state      uint32
 }
 
 const (
@@ -27,6 +28,9 @@ const (
 
 // RLock locks rw for reading.
 func (rw *RWMutex) RLock() {
+	for atomic.LoadUint32(&rw.tryLocking) != rwmutexUnlocked {
+		runtime.Gosched()
+	}
 	// Increase the number of readers by 1
 	state := atomic.AddUint32(&rw.state, rwmutexReadOffset)
 
@@ -48,6 +52,9 @@ func (rw *RWMutex) RLock() {
 // TryRLock tries to lock rw for reading.
 // If a lock for reading can not be acquired immediately, false is returned.
 func (rw *RWMutex) TryRLock() bool {
+	if atomic.LoadUint32(&rw.tryLocking) != rwmutexUnlocked {
+		return false
+	}
 	// Increase the number of readers by 1
 	state := atomic.AddUint32(&rw.state, rwmutexReadOffset)
 
@@ -79,15 +86,12 @@ func (rw *RWMutex) RUnlock() {
 // If the lock is already locked for reading or writing,
 // Lock blocks until the lock is available.
 func (rw *RWMutex) Lock() {
+	for !atomic.CompareAndSwapUint32(&rw.tryLocking, rwmutexUnlocked, rwmutexWrite) {
+		runtime.Gosched()
+	}
 	for !atomic.CompareAndSwapUint32(&rw.state, rwmutexUnlocked, rwmutexWrite) {
 		runtime.Gosched()
 	}
-}
-
-// TryLock tries to lock rw for writing.
-// If the lock for writing can not be acquired immediately, false is returned.
-func (rw *RWMutex) TryLock() bool {
-	return atomic.CompareAndSwapUint32(&rw.state, rwmutexUnlocked, rwmutexWrite)
 }
 
 // Unlock unlocks rw for writing.  It is a run-time error if rw is
@@ -102,6 +106,7 @@ func (rw *RWMutex) Unlock() {
 	if state&rwmutexWrite > 0 {
 		panic("sync: Unlock of unlocked RWMutex")
 	}
+	atomic.StoreUint32(&rw.tryLocking, rwmutexUnlocked)
 }
 
 // RLocker returns a Locker interface that implements
