@@ -55,17 +55,15 @@ func (b *bucket) onFlushTick(flushInterval int64) {
 	}
 }
 
-func (b *bucket) onNewItem(i *queuedStruct, maxBatch int, flushInterval int64) {
-	defer releaseQueuedStruct(i)
-
+func (b *bucket) onNewItem(k, v []byte, h uint64, maxBatch int, flushInterval int64) {
 	f := b.logger
 
 	index := f.index
-	indexId := i.h % uint64(len(index))
-	duplicated := index[indexId].exists(i.h)
+	indexId := h % uint64(len(index))
+	duplicated := index[indexId].exists(h)
 	forceFlush := false
 	if !duplicated {
-		kvLength := uint64(4) + uint64(len(i.K)) + uint64(len(i.V))
+		kvLength := uint64(4) + uint64(len(k)) + uint64(len(v))
 		idxNew, newChunk := f.incrementIndexes(kvLength)
 		if newChunk {
 			f.chunkCount++
@@ -73,13 +71,13 @@ func (b *bucket) onNewItem(i *queuedStruct, maxBatch int, flushInterval int64) {
 		if f.chunkCount <= int32(len(f.chunks)) {
 			flushChunk := &f.chunks[f.chunkCount]
 
-			lenBuf := makeKvLenBuf(i.K, i.V)
+			lenBuf := makeKvLenBuf(k, v)
 
 			copy(flushChunk.chunk[flushChunk.size:], lenBuf[:])
-			copy(flushChunk.chunk[flushChunk.size+4:], i.K)
-			copy(flushChunk.chunk[flushChunk.size+4+uint64(len(i.K)):], i.V)
+			copy(flushChunk.chunk[flushChunk.size+4:], k)
+			copy(flushChunk.chunk[flushChunk.size+4+uint64(len(k)):], v)
 
-			flushChunk.h = append(flushChunk.h, i.h)
+			flushChunk.h = append(flushChunk.h, h)
 			flushChunk.idx = append(flushChunk.idx, f.idx)
 			flushChunk.gen = append(flushChunk.gen, f.gen)
 			flushChunk.chunkId = f.currentChunkId
@@ -89,7 +87,7 @@ func (b *bucket) onNewItem(i *queuedStruct, maxBatch int, flushInterval int64) {
 				if atomic.LoadUint64(&index[indexId].h[j]) == 0 {
 					atomic.StoreUint64(&index[indexId].currentIdx[j], flushChunk.size)
 					atomic.StoreInt32(&index[indexId].flushChunk[j], f.chunkCount)
-					atomic.StoreUint64(&index[indexId].h[j], i.h)
+					atomic.StoreUint64(&index[indexId].h[j], h)
 					break
 				}
 			}

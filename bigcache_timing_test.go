@@ -13,6 +13,7 @@ func BenchmarkSetBig(b *testing.B) {
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
+			key[0]++
 			c.SetBig(key, value)
 		}
 	})

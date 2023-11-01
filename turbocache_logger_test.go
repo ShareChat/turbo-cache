@@ -225,7 +225,7 @@ func TestAsyncInsertToCache(t *testing.T) {
 				key := []byte(fmt.Sprintf("key %d", i))
 				hash := xxhash.Sum64(key)
 				expectedValue := []byte(fmt.Sprintf("value %d", i))
-				bucket.onNewItem(getQueuedStruct(key, expectedValue, hash), batch, 50000000)
+				bucket.onNewItem(key, expectedValue, hash, batch, 50000000)
 
 				actualValue, found, _ := bucket.Get(nil, key, hash, true)
 
@@ -262,7 +262,7 @@ func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
 					key := []byte(fmt.Sprintf("key %d", i))
 					h := xxhash.Sum64(key)
 
-					bucket.onNewItem(getQueuedStruct(key, key, h), batch, 50000000)
+					bucket.onNewItem(key, key, h, batch, 50000000)
 					wg.Add(1)
 					go func() {
 						actualValue, found, l1cache := bucket.Get(nil, key, h, true)

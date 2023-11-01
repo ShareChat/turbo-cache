@@ -318,7 +318,10 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int, fl
 				if i == nil {
 					return
 				}
-				b.onNewItem(i, maxBatch, flushInterval)
+				k, v := i.K, i.V
+				h := i.h
+				releaseQueuedStruct(i)
+				b.onNewItem(k, v, h, maxBatch, flushInterval)
 			case _ = <-t:
 				b.onFlushTick(flushInterval)
 			}
