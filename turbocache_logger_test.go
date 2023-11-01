@@ -358,7 +358,7 @@ func (c *Cache) waitForExpectedCacheSize(delayInMillis int) error {
 
 	for time.Since(t).Milliseconds() < int64(delayInMillis) {
 		for i := range c.buckets {
-			if len(c.buckets[i].setBuf) > 0 && atomic.LoadUint64(&c.buckets[i].flusher.writeBufferSize) > 0 {
+			if len(c.buckets[i].logger.setBuf) > 0 && atomic.LoadUint64(&c.buckets[i].logger.writeBufferSize) > 0 {
 				time.Sleep(time.Duration(delayInMillis/10) * time.Millisecond)
 				continue
 			}

@@ -9,7 +9,8 @@ import (
 	"time"
 )
 
-type flusher struct {
+type aheadLogger struct {
+	setBuf          chan *queuedStruct
 	count           int
 	chunks          []flushChunk
 	idx             uint64
@@ -22,6 +23,7 @@ type flusher struct {
 	spinlock        spinlock.RWMutex
 	latestTimestamp int64
 	writeBufferSize uint64
+	dropsInQueue    uint64
 }
 
 type flushChunk struct {
@@ -34,8 +36,19 @@ type flushChunk struct {
 	cleanChunk bool
 }
 
+func (l *aheadLogger) log(k, v []byte, h uint64) {
+	iv := getQueuedStruct(k, v, h)
+
+	select {
+	case l.setBuf <- iv:
+		return
+	default:
+		atomic.AddUint64(&l.dropsInQueue, 1)
+	}
+}
+
 func (b *bucket) onFlushTick(flushInterval int64) {
-	f := b.flusher
+	f := b.logger
 	if f.count > 0 && time.Since(time.UnixMilli(f.latestTimestamp)).Milliseconds() >= flushInterval {
 		b.setBatch(f.chunks[:f.chunkCount+1], f.idx, f.gen, f.needClean, f.count)
 		f.clean()
@@ -45,7 +58,7 @@ func (b *bucket) onFlushTick(flushInterval int64) {
 func (b *bucket) onNewItem(i *queuedStruct, maxBatch int, flushInterval int64) {
 	defer releaseQueuedStruct(i)
 
-	f := b.flusher
+	f := b.logger
 
 	index := f.index
 	indexId := i.h % uint64(len(index))
@@ -84,10 +97,10 @@ func (b *bucket) onNewItem(i *queuedStruct, maxBatch int, flushInterval int64) {
 			flushChunk.size += kvLength
 			f.idx = idxNew
 			f.count++
-			if b.flusher.latestTimestamp == 0 {
-				b.flusher.latestTimestamp = time.Now().UnixMilli()
+			if b.logger.latestTimestamp == 0 {
+				b.logger.latestTimestamp = time.Now().UnixMilli()
 			}
-			atomic.AddUint64(&b.flusher.writeBufferSize, 1)
+			atomic.AddUint64(&b.logger.writeBufferSize, 1)
 		} else {
 			atomic.AddUint64(&b.droppedWrites, 1)
 			forceFlush = true
@@ -97,15 +110,15 @@ func (b *bucket) onNewItem(i *queuedStruct, maxBatch int, flushInterval int64) {
 		atomic.AddUint64(&b.duplicatedCount, 1)
 	}
 
-	if f.count >= maxBatch || (f.count > 0 && (time.Since(time.UnixMilli(b.flusher.latestTimestamp)).Milliseconds() >= flushInterval || forceFlush)) {
+	if f.count >= maxBatch || (f.count > 0 && (time.Since(time.UnixMilli(b.logger.latestTimestamp)).Milliseconds() >= flushInterval || forceFlush)) {
 		b.setBatch(f.chunks[:f.chunkCount+1], f.idx, f.gen, f.needClean, f.count)
 		f.clean()
 	}
 }
 
-func (f *flusher) clean() {
-	index := f.index
-	f.spinlock.Lock()
+func (l *aheadLogger) clean() {
+	index := l.index
+	l.spinlock.Lock()
 
 	for i := 0; i < len(index); i++ {
 		for j := range index[i].h {
@@ -118,16 +131,16 @@ func (f *flusher) clean() {
 			}
 		}
 	}
-	for j := range f.chunks {
-		f.chunks[j].clean()
+	for j := range l.chunks {
+		l.chunks[j].clean()
 	}
-	f.spinlock.Unlock()
+	l.spinlock.Unlock()
 
-	f.chunkCount = 0
-	f.needClean = false
-	f.count = 0
-	f.latestTimestamp = 0
-	atomic.StoreUint64(&f.writeBufferSize, 0)
+	l.chunkCount = 0
+	l.needClean = false
+	l.count = 0
+	l.latestTimestamp = 0
+	atomic.StoreUint64(&l.writeBufferSize, 0)
 }
 
 func (b *flushChunk) clean() {
@@ -138,32 +151,41 @@ func (b *flushChunk) clean() {
 	b.gen = b.gen[:0]
 }
 
-func (b *bucket) randomDelay(maxDelayMillis int64) {
+func randomDelay(maxDelayMillis int64) {
 	jitterDelay := rand.Int63() % (maxDelayMillis * 1000)
 	time.Sleep(time.Duration(jitterDelay) * time.Microsecond)
 }
 
-func (f *flusher) incrementIndexes(kvLength uint64) (idxNew uint64, newChunk bool) {
-	idxNew = f.idx + kvLength
+func (l *aheadLogger) incrementIndexes(kvLength uint64) (idxNew uint64, newChunk bool) {
+	idxNew = l.idx + kvLength
 	chunkIdxNew := idxNew / chunkSize
-	if chunkIdxNew > f.currentChunkId {
-		if chunkIdxNew >= f.totalChunkCount {
-			f.idx = 0
+	if chunkIdxNew > l.currentChunkId {
+		if chunkIdxNew >= l.totalChunkCount {
+			l.idx = 0
 			idxNew = kvLength
-			f.currentChunkId = 0
-			f.gen++
-			if f.gen&((1<<genSizeBits)-1) == 0 {
-				f.gen++
+			l.currentChunkId = 0
+			l.gen++
+			if l.gen&((1<<genSizeBits)-1) == 0 {
+				l.gen++
 			}
-			f.needClean = true
+			l.needClean = true
 		} else {
-			f.idx = chunkIdxNew * chunkSize
-			idxNew = f.idx + kvLength
-			f.currentChunkId = chunkIdxNew
+			l.idx = chunkIdxNew * chunkSize
+			idxNew = l.idx + kvLength
+			l.currentChunkId = chunkIdxNew
 		}
 		newChunk = true
 	}
 	return idxNew, newChunk
+}
+
+func makeKvLenBuf(k []byte, v []byte) [4]byte {
+	var kvLenBuf [4]byte
+	kvLenBuf[0] = byte(uint16(len(k)) >> 8)
+	kvLenBuf[1] = byte(len(k))
+	kvLenBuf[2] = byte(uint16(len(v)) >> 8)
+	kvLenBuf[3] = byte(len(v))
+	return kvLenBuf
 }
 
 var insertValuePool = &sync.Pool{New: func() any {

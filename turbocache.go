@@ -236,8 +236,8 @@ func (c *Cache) Close() {
 
 func (c *Cache) stopFlushing() {
 	for i := range c.buckets[:] {
-		if c.buckets[i].setBuf != nil {
-			close(c.buckets[i].setBuf)
+		if c.buckets[i].logger.setBuf != nil {
+			close(c.buckets[i].logger.setBuf)
 		}
 	}
 }
@@ -267,10 +267,9 @@ type bucket struct {
 	// It consists of 64KB chunks.
 	chunks [][]byte
 
-	setBuf chan *queuedStruct
 	// m maps hash(k) to idx of (k, v) pair in chunks.
-	m       map[uint64]uint64
-	flusher *flusher
+	m      map[uint64]uint64
+	logger *aheadLogger
 	// idx points to chunks for writing the next (k, v) pair.
 	idx atomic.Uint64
 
@@ -283,7 +282,6 @@ type bucket struct {
 	misses          uint64
 	collisions      uint64
 	corruptions     uint64
-	dropsInQueue    uint64
 	droppedWrites   uint64
 	duplicatedCount uint64
 }
@@ -306,18 +304,17 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, flushC
 }
 
 func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int, flushChunks int) {
-	b.setBuf = make(chan *queuedStruct, setBufSize)
 	b.initFlusher(maxBatch, flushChunks)
 	go func() {
 		maxDelay := flushInterval
 		if maxDelay > 5 {
 			maxDelay = 5
 		}
-		b.randomDelay(maxDelay)
+		randomDelay(maxDelay)
 		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
 		for {
 			select {
-			case i := <-b.setBuf:
+			case i := <-b.logger.setBuf:
 				if i == nil {
 					return
 				}
@@ -330,7 +327,7 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int, fl
 }
 
 func (b *bucket) initFlusher(maxBatch int, chunks int) {
-	b.flusher = &flusher{
+	b.logger = &aheadLogger{
 		count:           0,
 		idx:             b.idx.Load(),
 		gen:             b.gen,
@@ -338,8 +335,9 @@ func (b *bucket) initFlusher(maxBatch int, chunks int) {
 		chunkCount:      0,
 		totalChunkCount: uint64(len(b.chunks)),
 		needClean:       false,
+		setBuf:          make(chan *queuedStruct, setBufSize),
 	}
-	b.flusher.chunks = make([]flushChunk, 4)
+	b.logger.chunks = make([]flushChunk, 4)
 
 	itemsPerChunk := maxBatch
 	if initItemsPerFlushChunk < itemsPerChunk {
@@ -348,7 +346,7 @@ func (b *bucket) initFlusher(maxBatch int, chunks int) {
 
 	for i := 0; i < chunks; i++ {
 		array := getChunkArray()
-		b.flusher.chunks[i] = flushChunk{
+		b.logger.chunks[i] = flushChunk{
 			chunkId:    0,
 			chunk:      *array,
 			h:          make([]uint64, 0, itemsPerChunk),
@@ -358,7 +356,7 @@ func (b *bucket) initFlusher(maxBatch int, chunks int) {
 			cleanChunk: false,
 		}
 	}
-	b.flusher.index = make([]flushChunkIndexItem, primeNumber.NextPrime(uint64(maxBatch)))
+	b.logger.index = make([]flushChunkIndexItem, primeNumber.NextPrime(uint64(maxBatch)))
 }
 
 func (b *bucket) Reset() {
@@ -408,9 +406,9 @@ func (b *bucket) UpdateStats(s *Stats, details bool) {
 	s.Misses += atomic.LoadUint64(&b.misses)
 	s.Collisions += atomic.LoadUint64(&b.collisions)
 	s.Corruptions += atomic.LoadUint64(&b.corruptions)
-	s.DropsInQueue += atomic.LoadUint64(&b.dropsInQueue)
+	s.DropsInQueue += atomic.LoadUint64(&b.logger.dropsInQueue)
 	s.DroppedWrites += atomic.LoadUint64(&b.droppedWrites)
-	s.WriteQueueSize += atomic.LoadUint64(&b.flusher.writeBufferSize) + uint64(len(b.setBuf))
+	s.WriteQueueSize += atomic.LoadUint64(&b.logger.writeBufferSize) + uint64(len(b.logger.setBuf))
 	s.SetBatchCalls += atomic.LoadUint64(&b.batchSetCalls)
 	s.DuplicatedCount += atomic.LoadUint64(&b.duplicatedCount)
 
@@ -432,15 +430,7 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 	if sync {
 		b.syncSet(k, v, h)
 	} else {
-		iv := getQueuedStruct(k, v, h)
-
-		select {
-		case b.setBuf <- iv:
-			return
-		default:
-			atomic.AddUint64(&b.dropsInQueue, 1)
-		}
-
+		b.logger.log(k, v, h)
 	}
 }
 
@@ -531,15 +521,6 @@ func (b *bucket) setBatch(chunks []flushChunk, idx uint64, gen uint64, needClean
 	}
 }
 
-func makeKvLenBuf(k []byte, v []byte) [4]byte {
-	var kvLenBuf [4]byte
-	kvLenBuf[0] = byte(uint16(len(k)) >> 8)
-	kvLenBuf[1] = byte(len(k))
-	kvLenBuf[2] = byte(uint16(len(v)) >> 8)
-	kvLenBuf[3] = byte(len(v))
-	return kvLenBuf
-}
-
 func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool, bool) {
 	atomic.AddUint64(&b.getCalls, 1)
 	found := false
@@ -585,7 +566,7 @@ func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool, boo
 end:
 	b.mu.RUnlock()
 	if !found {
-		bytes, found := b.flusher.tryFindInFlushIndex(dst, k, h, returnDst)
+		bytes, found := b.logger.lookup(dst, k, h, returnDst)
 		if found {
 			return bytes, found, true
 		} else {
