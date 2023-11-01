@@ -331,13 +331,13 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int, fl
 
 func (b *bucket) initFlusher(maxBatch int, chunks int) {
 	b.flusher = &flusher{
-		count:               0,
-		idx:                 b.idx.Load(),
-		gen:                 b.gen,
-		currentChunkId:      b.idx.Load() / chunkSize,
-		currentFlushChunkId: 0,
-		totalChunkCount:     uint64(len(b.chunks)),
-		needClean:           false,
+		count:           0,
+		idx:             b.idx.Load(),
+		gen:             b.gen,
+		currentChunkId:  b.idx.Load() / chunkSize,
+		chunkCount:      0,
+		totalChunkCount: uint64(len(b.chunks)),
+		needClean:       false,
 	}
 	b.flusher.chunks = make([]flushChunk, 4)
 
@@ -504,13 +504,13 @@ func (b *bucket) syncSet(k, v []byte, h uint64) {
 	b.mu.Unlock()
 }
 
-func (b *bucket) setBatch(f *flusher) {
-	atomic.AddUint64(&b.setCalls, uint64(f.count))
+func (b *bucket) setBatch(chunks []flushChunk, idx uint64, gen uint64, needClean bool, keyCount int) {
+	atomic.AddUint64(&b.setCalls, uint64(keyCount))
 	atomic.AddUint64(&b.batchSetCalls, 1)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for i := int32(0); i <= f.currentFlushChunkId; i++ {
-		f := &f.chunks[i]
+	for i := 0; i < len(chunks); i++ {
+		f := chunks[i]
 		chunk := b.chunks[f.chunkId]
 		if chunk == nil {
 			chunk = getChunk()[:0]
@@ -524,10 +524,10 @@ func (b *bucket) setBatch(f *flusher) {
 			b.m[f.h[j]] = f.idx[j] | (f.gen[j] << bucketSizeBits)
 		}
 	}
-	b.idx.Store(f.idx)
-	b.gen = f.gen
-	if f.needClean {
-		b.cleanLocked(f.idx)
+	b.idx.Store(idx)
+	b.gen = gen
+	if needClean {
+		b.cleanLocked(idx)
 	}
 }
 
