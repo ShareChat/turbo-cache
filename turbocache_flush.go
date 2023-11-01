@@ -20,6 +20,8 @@ type flusher struct {
 	totalChunkCount     uint64
 	needClean           bool
 	spinlock            spinlock.RWMutex
+	latestTimestamp     int64
+	writeBufferSize     uint64
 }
 
 type flushChunk struct {
@@ -33,7 +35,7 @@ type flushChunk struct {
 }
 
 func (b *bucket) onFlushTick(flushInterval int64) {
-	if b.flusher.count > 0 && time.Since(time.UnixMilli(b.latestTimestamp)).Milliseconds() >= flushInterval {
+	if b.flusher.count > 0 && time.Since(time.UnixMilli(b.flusher.latestTimestamp)).Milliseconds() >= flushInterval {
 		b.setBatch(b.flusher)
 		b.cleanFlusher(b.flusher)
 	}
@@ -44,7 +46,7 @@ func (b *bucket) onNewItem(i *queuedStruct, maxBatch int, flushInterval int64) {
 
 	f := b.flusher
 
-	index := b.flusher.index
+	index := f.index
 	indexId := i.h % uint64(len(index))
 	duplicated := index[indexId].exists(i.h)
 	forceFlush := false
@@ -81,10 +83,10 @@ func (b *bucket) onNewItem(i *queuedStruct, maxBatch int, flushInterval int64) {
 			flushChunk.size += kvLength
 			f.idx = idxNew
 			f.count++
-			if b.latestTimestamp == 0 {
-				b.latestTimestamp = time.Now().UnixMilli()
+			if b.flusher.latestTimestamp == 0 {
+				b.flusher.latestTimestamp = time.Now().UnixMilli()
 			}
-			atomic.AddUint64(&b.writeBufferSize, 1)
+			atomic.AddUint64(&b.flusher.writeBufferSize, 1)
 		} else {
 			atomic.AddUint64(&b.droppedWrites, 1)
 			forceFlush = true
@@ -94,41 +96,14 @@ func (b *bucket) onNewItem(i *queuedStruct, maxBatch int, flushInterval int64) {
 		atomic.AddUint64(&b.duplicatedCount, 1)
 	}
 
-	if f.count >= maxBatch || (f.count > 0 && (time.Since(time.UnixMilli(b.latestTimestamp)).Milliseconds() >= flushInterval || forceFlush)) {
+	if f.count >= maxBatch || (f.count > 0 && (time.Since(time.UnixMilli(b.flusher.latestTimestamp)).Milliseconds() >= flushInterval || forceFlush)) {
 		b.setBatch(f)
 		b.cleanFlusher(f)
 	}
 }
 
-func (b *bucket) setBatch(f *flusher) {
-	atomic.AddUint64(&b.setCalls, uint64(f.count))
-	atomic.AddUint64(&b.batchSetCalls, 1)
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for i := int32(0); i <= f.currentFlushChunkId; i++ {
-		f := &f.chunks[i]
-		chunk := b.chunks[f.chunkId]
-		if chunk == nil {
-			chunk = getChunk()[:0]
-		} else if f.cleanChunk {
-			chunk = chunk[:0]
-		}
-
-		b.chunks[f.chunkId] = append(chunk, f.chunk[:f.size]...)
-
-		for j := 0; j < len(f.h); j++ {
-			b.m[f.h[j]] = f.idx[j] | (f.gen[j] << bucketSizeBits)
-		}
-	}
-	b.idx.Store(f.idx)
-	b.gen = f.gen
-	if f.needClean {
-		b.cleanLocked(f.idx)
-	}
-}
-
 func (b *bucket) cleanFlusher(f *flusher) {
-	index := b.flusher.index
+	index := f.index
 	f.spinlock.Lock()
 
 	for i := 0; i < len(index); i++ {
@@ -150,8 +125,8 @@ func (b *bucket) cleanFlusher(f *flusher) {
 	f.currentFlushChunkId = 0
 	f.needClean = false
 	f.count = 0
-	b.latestTimestamp = 0
-	atomic.StoreUint64(&b.writeBufferSize, 0)
+	f.latestTimestamp = 0
+	atomic.StoreUint64(&b.flusher.writeBufferSize, 0)
 }
 
 func (b *flushChunk) clean() {

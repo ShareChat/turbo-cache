@@ -283,11 +283,9 @@ type bucket struct {
 	misses          uint64
 	collisions      uint64
 	corruptions     uint64
-	writeBufferSize uint64
 	dropsInQueue    uint64
 	droppedWrites   uint64
 	duplicatedCount uint64
-	latestTimestamp int64
 }
 
 func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, flushChunks int, syncWrite bool) {
@@ -412,7 +410,7 @@ func (b *bucket) UpdateStats(s *Stats, details bool) {
 	s.Corruptions += atomic.LoadUint64(&b.corruptions)
 	s.DropsInQueue += atomic.LoadUint64(&b.dropsInQueue)
 	s.DroppedWrites += atomic.LoadUint64(&b.droppedWrites)
-	s.WriteQueueSize += atomic.LoadUint64(&b.writeBufferSize) + uint64(len(b.setBuf))
+	s.WriteQueueSize += atomic.LoadUint64(&b.flusher.writeBufferSize) + uint64(len(b.setBuf))
 	s.SetBatchCalls += atomic.LoadUint64(&b.batchSetCalls)
 	s.DuplicatedCount += atomic.LoadUint64(&b.duplicatedCount)
 
@@ -504,6 +502,33 @@ func (b *bucket) syncSet(k, v []byte, h uint64) {
 		b.cleanLocked(idxNew)
 	}
 	b.mu.Unlock()
+}
+
+func (b *bucket) setBatch(f *flusher) {
+	atomic.AddUint64(&b.setCalls, uint64(f.count))
+	atomic.AddUint64(&b.batchSetCalls, 1)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i := int32(0); i <= f.currentFlushChunkId; i++ {
+		f := &f.chunks[i]
+		chunk := b.chunks[f.chunkId]
+		if chunk == nil {
+			chunk = getChunk()[:0]
+		} else if f.cleanChunk {
+			chunk = chunk[:0]
+		}
+
+		b.chunks[f.chunkId] = append(chunk, f.chunk[:f.size]...)
+
+		for j := 0; j < len(f.h); j++ {
+			b.m[f.h[j]] = f.idx[j] | (f.gen[j] << bucketSizeBits)
+		}
+	}
+	b.idx.Store(f.idx)
+	b.gen = f.gen
+	if f.needClean {
+		b.cleanLocked(f.idx)
+	}
 }
 
 func makeKvLenBuf(k []byte, v []byte) [4]byte {
