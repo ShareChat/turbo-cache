@@ -6,7 +6,6 @@ import (
 	"github.com/cespare/xxhash/v2"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 const setBufSize = 64
@@ -297,35 +296,8 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, flushC
 	b.m = make(map[uint64]uint64)
 	b.Reset()
 	if !syncWrite {
-		b.startProcessingWriteQueue(flushInterval, maxBatch, flushChunks)
+		b.logger = newLogger(b, maxBatch, flushChunks, b.idx.Load(), b.gen, uint64(len(b.chunks)), flushInterval)
 	}
-
-}
-
-func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int, flushChunks int) {
-	b.logger = newLogger(maxBatch, flushChunks, b.idx.Load(), b.gen, uint64(len(b.chunks)))
-	go func() {
-		maxDelay := flushInterval
-		if maxDelay > 5 {
-			maxDelay = 5
-		}
-		randomDelay(maxDelay)
-		t := time.Tick(time.Duration(flushInterval) * time.Millisecond)
-		for {
-			select {
-			case i := <-b.logger.setBuf:
-				if i == nil {
-					return
-				}
-				k, v := i.K, i.V
-				h := i.h
-				releaseQueuedStruct(i)
-				b.onNewItem(k, v, h, maxBatch, flushInterval)
-			case _ = <-t:
-				b.onFlushTick(flushInterval)
-			}
-		}
-	}()
 }
 
 func (b *bucket) Reset() {
