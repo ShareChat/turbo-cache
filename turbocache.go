@@ -270,7 +270,7 @@ type bucket struct {
 	m      map[uint64]uint64
 	logger writeAheadLogger
 	// idx points to chunks for writing the next (k, v) pair.
-	idx atomic.Uint64
+	idx uint64
 
 	// gen is the generation of chunks.
 	gen uint64
@@ -295,7 +295,7 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, flushC
 	b.m = make(map[uint64]uint64)
 	b.Reset()
 	if !syncWrite {
-		b.logger = newLogger(b, maxBatch, flushChunks, b.idx.Load(), b.gen, uint64(len(b.chunks)), flushInterval)
+		b.logger = newLogger(b, maxBatch, flushChunks, b.idx, b.gen, uint64(len(b.chunks)), flushInterval)
 	}
 }
 
@@ -307,7 +307,7 @@ func (b *bucket) Reset() {
 		chunks[i] = nil //
 	}
 	b.m = make(map[uint64]uint64)
-	b.idx.Store(0)
+	b.idx = 0
 	b.gen = 1
 	b.mu.Unlock()
 	atomic.StoreUint64(&b.getCalls, 0)
@@ -367,7 +367,7 @@ func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool, boo
 
 	chunks := b.chunks
 	b.mu.RLock()
-	currentIdx := b.idx.Load()
+	currentIdx := b.idx
 	v := b.m[h]
 	bGen := b.gen & ((1 << genSizeBits) - 1)
 	if v > 0 {
@@ -441,7 +441,7 @@ func (b *bucket) syncSet(k, v []byte, h uint64) {
 	chunks := b.chunks
 	needClean := false
 	b.mu.Lock()
-	idx := b.idx.Load()
+	idx := b.idx
 	idxNew := idx + kvLen
 	chunkIdx := idx / chunkSize
 	chunkIdxNew := idxNew / chunkSize
@@ -472,7 +472,7 @@ func (b *bucket) syncSet(k, v []byte, h uint64) {
 	chunk = append(chunk, v...)
 	chunks[chunkIdx] = chunk
 	b.m[h] = idx | (b.gen << bucketSizeBits)
-	b.idx.Store(idxNew)
+	b.idx = idxNew
 	if needClean {
 		b.cleanLocked(idxNew)
 	}
@@ -499,7 +499,7 @@ func (b *bucket) setBatch(chunks []flushChunk, idx uint64, gen uint64, needClean
 			b.m[f.h[j]] = f.idx[j] | (f.gen[j] << bucketSizeBits)
 		}
 	}
-	b.idx.Store(idx)
+	b.idx = idx
 	b.gen = gen
 	if needClean {
 		b.cleanLocked(idx)
