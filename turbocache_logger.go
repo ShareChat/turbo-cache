@@ -119,8 +119,7 @@ func (l *aheadLogger) log(k, v []byte, h uint64) {
 
 func (l *aheadLogger) onFlushTick(flushInterval int64) {
 	if l.count > 0 && time.Since(time.UnixMilli(l.latestTimestamp)).Milliseconds() >= flushInterval {
-		l.writer.setBatch(l.chunks[:l.currentFlunkChunkIndex+1], l.idx, l.gen, l.needClean, l.count)
-		l.clean()
+		l.flush()
 	}
 }
 
@@ -128,58 +127,58 @@ func (l *aheadLogger) onNewItem(k, v []byte, h uint64, maxBatch int, flushInterv
 	index := l.index
 	indexId := h % uint64(len(index))
 	duplicated := index[indexId].exists(h)
-	forceFlush := false
 	if !duplicated {
 		kvLength := uint64(4) + uint64(len(k)) + uint64(len(v))
 		idxNew, newChunk := l.incrementIndexes(kvLength)
 		if newChunk {
 			if l.currentFlunkChunkIndex+1 >= int32(len(l.chunks)) {
-				forceFlush = true
-				atomic.AddUint64(&l.stats.droppedWrites, 1)
+				l.flush()
 			} else {
 				l.currentFlunkChunkIndex++
 			}
 		}
-		if !forceFlush {
-			flushChunk := &l.chunks[l.currentFlunkChunkIndex]
+		flushChunk := &l.chunks[l.currentFlunkChunkIndex]
 
-			lenBuf := makeKvLenBuf(k, v)
+		lenBuf := makeKvLenBuf(k, v)
 
-			copy(flushChunk.chunk[flushChunk.size:], lenBuf[:])
-			copy(flushChunk.chunk[flushChunk.size+4:], k)
-			copy(flushChunk.chunk[flushChunk.size+4+uint64(len(k)):], v)
+		copy(flushChunk.chunk[flushChunk.size:], lenBuf[:])
+		copy(flushChunk.chunk[flushChunk.size+4:], k)
+		copy(flushChunk.chunk[flushChunk.size+4+uint64(len(k)):], v)
 
-			flushChunk.h = append(flushChunk.h, h)
-			flushChunk.idx = append(flushChunk.idx, l.idx)
-			flushChunk.gen = append(flushChunk.gen, l.gen)
-			flushChunk.chunkId = l.currentChunkId
-			flushChunk.cleanChunk = newChunk
+		flushChunk.h = append(flushChunk.h, h)
+		flushChunk.idx = append(flushChunk.idx, l.idx)
+		flushChunk.gen = append(flushChunk.gen, l.gen)
+		flushChunk.chunkId = l.currentChunkId
+		flushChunk.cleanChunk = newChunk
 
-			for j := range index[indexId].h {
-				if atomic.LoadUint64(&index[indexId].h[j]) == 0 {
-					atomic.StoreUint64(&index[indexId].currentIdx[j], flushChunk.size)
-					atomic.StoreInt32(&index[indexId].flushChunk[j], l.currentFlunkChunkIndex)
-					atomic.StoreUint64(&index[indexId].h[j], h)
-					break
-				}
+		for j := range index[indexId].h {
+			if atomic.LoadUint64(&index[indexId].h[j]) == 0 {
+				atomic.StoreUint64(&index[indexId].currentIdx[j], flushChunk.size)
+				atomic.StoreInt32(&index[indexId].flushChunk[j], l.currentFlunkChunkIndex)
+				atomic.StoreUint64(&index[indexId].h[j], h)
+				break
 			}
-
-			flushChunk.size += kvLength
-			l.idx = idxNew
-			l.count++
-			if l.latestTimestamp == 0 {
-				l.latestTimestamp = time.Now().UnixMilli()
-			}
-			atomic.AddUint64(&l.stats.writeBufferSize, 1)
 		}
+
+		flushChunk.size += kvLength
+		l.idx = idxNew
+		l.count++
+		if l.latestTimestamp == 0 {
+			l.latestTimestamp = time.Now().UnixMilli()
+		}
+		atomic.AddUint64(&l.stats.writeBufferSize, 1)
 	} else {
 		atomic.AddUint64(&l.stats.duplicatedCount, 1)
 	}
 
-	if l.count >= maxBatch || (l.count > 0 && (time.Since(time.UnixMilli(l.latestTimestamp)).Milliseconds() >= flushInterval || forceFlush)) {
-		l.writer.setBatch(l.chunks[:l.currentFlunkChunkIndex+1], l.idx, l.gen, l.needClean, l.count)
-		l.clean()
+	if l.count >= maxBatch || (l.count > 0 && (time.Since(time.UnixMilli(l.latestTimestamp)).Milliseconds() >= flushInterval)) {
+		l.flush()
 	}
+}
+
+func (l *aheadLogger) flush() {
+	l.writer.setBatch(l.chunks[:l.currentFlunkChunkIndex+1], l.idx, l.gen, l.needClean, l.count)
+	l.clean()
 }
 
 func (l *aheadLogger) clean() {

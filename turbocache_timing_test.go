@@ -357,5 +357,5 @@ func BenchmarkSyncMapSetGet(b *testing.B) {
 }
 
 func newCacheConfigBenchmarkParams(maxBytes int) *Config {
-	return NewConfig(maxBytes, 1000, 100, 2)
+	return NewConfig(maxBytes, 1000, 100, 1)
 }
