@@ -123,8 +123,8 @@ func (l *aheadLogger) flushTime() bool {
 
 func (l *aheadLogger) onNewItem(k, v []byte, h uint64, maxBatch int) {
 	index := l.index
-	indexId := h % uint64(len(index))
-	if !index[indexId].exists(h) {
+	indexItem := &index[h%uint64(len(index))]
+	if !indexItem.exists(h) {
 		kvLength := uint64(4) + uint64(len(k)) + uint64(len(v))
 		idxNew, newChunk := l.incrementIndexes(kvLength)
 		if newChunk {
@@ -139,8 +139,8 @@ func (l *aheadLogger) onNewItem(k, v []byte, h uint64, maxBatch int) {
 		lenBuf := makeKvLenBuf(k, v)
 
 		copy(flushChunk.chunk[flushChunk.chunkSize:], lenBuf[:])
-		copy(flushChunk.chunk[flushChunk.chunkSize+4:], k)
-		copy(flushChunk.chunk[flushChunk.chunkSize+4+uint64(len(k)):], v)
+		copy(flushChunk.chunk[flushChunk.chunkSize+kvLenBufSize:], k)
+		copy(flushChunk.chunk[flushChunk.chunkSize+kvLenBufSize+uint64(len(k)):], v)
 
 		flushChunk.h = append(flushChunk.h, h)
 		flushChunk.idx = append(flushChunk.idx, l.idx)
@@ -148,11 +148,11 @@ func (l *aheadLogger) onNewItem(k, v []byte, h uint64, maxBatch int) {
 		flushChunk.chunkId = l.currentChunkId
 		flushChunk.cleanChunk = newChunk
 
-		for j := range index[indexId].h {
-			if atomic.LoadUint64(&index[indexId].h[j]) == 0 {
-				atomic.StoreUint64(&index[indexId].currentIdx[j], flushChunk.chunkSize)
-				atomic.StoreInt32(&index[indexId].flushChunk[j], l.currentFlunkChunkIndex)
-				atomic.StoreUint64(&index[indexId].h[j], h)
+		for j := range indexItem.h {
+			if atomic.LoadUint64(&indexItem.h[j]) == 0 {
+				atomic.StoreUint64(&indexItem.currentIdx[j], flushChunk.chunkSize)
+				atomic.StoreInt32(&indexItem.flushChunk[j], l.currentFlunkChunkIndex)
+				atomic.StoreUint64(&indexItem.h[j], h)
 				break
 			}
 		}
@@ -233,8 +233,8 @@ func (l *aheadLogger) incrementIndexes(kvLength uint64) (idxNew uint64, newChunk
 	return idxNew, newChunk
 }
 
-func makeKvLenBuf(k []byte, v []byte) [4]byte {
-	var kvLenBuf [4]byte
+func makeKvLenBuf(k []byte, v []byte) [kvLenBufSize]byte {
+	var kvLenBuf [kvLenBufSize]byte
 	kvLenBuf[0] = byte(uint16(len(k)) >> 8)
 	kvLenBuf[1] = byte(len(k))
 	kvLenBuf[2] = byte(uint16(len(v)) >> 8)
