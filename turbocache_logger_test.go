@@ -227,7 +227,7 @@ func TestAsyncInsertToCache(t *testing.T) {
 				key := []byte(fmt.Sprintf("key %d", i))
 				hash := xxhash.Sum64(key)
 				expectedValue := []byte(fmt.Sprintf("value %d", i))
-				bucket.logger.(*aheadLogger).onNewItem(key, expectedValue, hash, batch, 50000000)
+				bucket.logger.(*aheadLogger).onNewItem(key, expectedValue, hash, batch)
 
 				actualValue, found, _ := bucket.Get(nil, key, hash, true)
 
@@ -265,7 +265,7 @@ func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
 					key := []byte(fmt.Sprintf("key %d", i))
 					h := xxhash.Sum64(key)
 
-					bucket.logger.(*aheadLogger).onNewItem(key, key, h, batch, 50000000)
+					bucket.logger.(*aheadLogger).onNewItem(key, key, h, batch)
 					wg.Add(1)
 					_ = throttler.Acquire(context.Background(), 1)
 					go func() {

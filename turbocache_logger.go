@@ -25,6 +25,7 @@ type aheadLogger struct {
 	spinlock               spinlock.RWMutex
 	latestTimestamp        int64
 	stats                  *loggerStats
+	flushInterval          int64
 }
 
 type loggerStats struct {
@@ -56,6 +57,7 @@ func newLogger(bucket *bucket, maxBatch int, flushChunkCount int, idx uint64, ge
 		chunks:                 make([]flushChunk, flushChunkCount),
 		writer:                 bucket,
 		stats:                  &loggerStats{},
+		flushInterval:          interval,
 	}
 
 	itemsPerChunk := maxBatch
@@ -77,18 +79,18 @@ func newLogger(bucket *bucket, maxBatch int, flushChunkCount int, idx uint64, ge
 	}
 	result.index = make([]flushChunkIndexItem, primeNumber.NextPrime(uint64(maxBatch)))
 
-	go result.startProcessingWriteQueue(interval, maxBatch)
+	go result.startProcessingWriteQueue(maxBatch)
 
 	return result
 }
 
-func (l *aheadLogger) startProcessingWriteQueue(interval int64, maxBatch int) {
-	maxDelay := interval
+func (l *aheadLogger) startProcessingWriteQueue(maxBatch int) {
+	maxDelay := l.flushInterval
 	if maxDelay > 5 {
 		maxDelay = 5
 	}
 	randomDelay(maxDelay)
-	t := time.Tick(time.Duration(interval) * time.Millisecond)
+	t := time.Tick(time.Duration(l.flushInterval) * time.Millisecond)
 	for {
 		select {
 		case i := <-l.setBuf:
@@ -98,9 +100,9 @@ func (l *aheadLogger) startProcessingWriteQueue(interval int64, maxBatch int) {
 			k, v := i.K, i.V
 			h := i.h
 			releaseQueuedStruct(i)
-			l.onNewItem(k, v, h, maxBatch, interval)
+			l.onNewItem(k, v, h, maxBatch)
 		case _ = <-t:
-			l.onFlushTick(interval)
+			l.onFlushTick()
 		}
 	}
 }
@@ -116,17 +118,20 @@ func (l *aheadLogger) log(k, v []byte, h uint64) {
 	}
 }
 
-func (l *aheadLogger) onFlushTick(flushInterval int64) {
-	if l.count > 0 && time.Since(time.UnixMilli(l.latestTimestamp)).Milliseconds() >= flushInterval {
+func (l *aheadLogger) onFlushTick() {
+	if l.flushTime() {
 		l.flush()
 	}
 }
 
-func (l *aheadLogger) onNewItem(k, v []byte, h uint64, maxBatch int, flushInterval int64) {
+func (l *aheadLogger) flushTime() bool {
+	return l.count > 0 && time.Since(time.UnixMilli(l.latestTimestamp)).Milliseconds() >= l.flushInterval
+}
+
+func (l *aheadLogger) onNewItem(k, v []byte, h uint64, maxBatch int) {
 	index := l.index
 	indexId := h % uint64(len(index))
-	duplicated := index[indexId].exists(h)
-	if !duplicated {
+	if !index[indexId].exists(h) {
 		kvLength := uint64(4) + uint64(len(k)) + uint64(len(v))
 		idxNew, newChunk := l.incrementIndexes(kvLength)
 		if newChunk {
@@ -170,7 +175,7 @@ func (l *aheadLogger) onNewItem(k, v []byte, h uint64, maxBatch int, flushInterv
 		atomic.AddUint64(&l.stats.duplicatedCount, 1)
 	}
 
-	if l.count >= maxBatch || (l.count > 0 && (time.Since(time.UnixMilli(l.latestTimestamp)).Milliseconds() >= flushInterval)) {
+	if l.count >= maxBatch || l.flushTime() {
 		l.flush()
 	}
 }
