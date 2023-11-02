@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+const setBufSize = 64
+const defaultMaxWriteSizeBatch = 250
+const defaultFlushIntervalMillis = 5
+const initItemsPerFlushChunk = 128
+
 type aheadLogger struct {
 	spinlock               spinlock.RWMutex
 	writer                 cacheWriter

@@ -8,10 +8,6 @@ import (
 	"sync/atomic"
 )
 
-const setBufSize = 64
-const defaultMaxWriteSizeBatch = 250
-const defaultFlushIntervalMillis = 5
-
 const bucketsCount = 512
 
 const chunkSize = 64 * 1024
@@ -23,7 +19,6 @@ const genSizeBits = 64 - bucketSizeBits
 const maxGen = 1<<genSizeBits - 1
 
 const maxBucketSize uint64 = 1 << bucketSizeBits
-const initItemsPerFlushChunk = 128
 const kvLenBufSize = 4
 
 // Stats represents cache stats.
