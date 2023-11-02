@@ -34,6 +34,13 @@ type loggerStats struct {
 	duplicatedCount uint64
 }
 
+type writeAheadLogger interface {
+	log(k, v []byte, h uint64)
+	lookup(dst []byte, k []byte, h uint64, returnDst bool) ([]byte, bool)
+	getStats() *loggerStats
+	stopFlushing()
+}
+
 func newLogger(cacheWriter cacheWriter, maxBatch int, flushChunkCount int, idx uint64, gen uint64, chunks uint64, interval int64) writeAheadLogger {
 	result := &aheadLogger{
 		count:                  0,
@@ -198,14 +205,6 @@ func (l *aheadLogger) clean() {
 	atomic.StoreUint64(&l.stats.writeBufferSize, 0)
 }
 
-func (b *flushChunk) clean() {
-	b.h = b.h[:0]
-	b.idx = b.idx[:0]
-	b.chunkSize = 0
-	b.cleanChunk = false
-	b.gen = b.gen[:0]
-}
-
 func randomDelay() {
 	jitterDelay := rand.Int63() % (5 * 1000)
 	time.Sleep(time.Duration(jitterDelay) * time.Microsecond)
@@ -278,15 +277,4 @@ func (l *aheadLogger) stopFlushing() {
 type queuedStruct struct {
 	K, V []byte
 	h    uint64
-}
-
-type cacheWriter interface {
-	setBatch(chunks []flushChunk, idx uint64, gen uint64, needClean bool, keyCount int)
-}
-
-type writeAheadLogger interface {
-	log(k, v []byte, h uint64)
-	lookup(dst []byte, k []byte, h uint64, returnDst bool) ([]byte, bool)
-	getStats() *loggerStats
-	stopFlushing()
 }
