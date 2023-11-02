@@ -125,6 +125,17 @@ type Cache struct {
 	syncWrite bool
 }
 
+// flush chunk for batch set
+type flushChunk struct {
+	chunkId    uint64
+	chunk      [chunkSize]byte
+	h          []uint64
+	idx        []uint64
+	gen        []uint64
+	chunkSize  uint64
+	cleanChunk bool
+}
+
 // New returns new cache with the given maxBytes capacity in bytes.
 //
 // maxBytes must be smaller than the available RAM size for the app,
@@ -168,12 +179,6 @@ func (c *Cache) Set(k, v []byte) {
 	h := xxhash.Sum64(k)
 	idx := h % bucketsCount
 	c.buckets[idx].Set(k, v, h, c.syncWrite)
-}
-
-func (c *Cache) setSync(k, v []byte) {
-	h := xxhash.Sum64(k)
-	idx := h % bucketsCount
-	c.buckets[idx].Set(k, v, h, true)
 }
 
 // Get appends value by the key k to dst and returns the result.
@@ -312,20 +317,6 @@ func (b *bucket) Reset() {
 	atomic.StoreUint64(&b.corruptions, 0)
 }
 
-func (b *bucket) cleanLocked(idx uint64) {
-	bGen := b.gen & ((1 << genSizeBits) - 1)
-	bIdx := idx
-	bm := b.m
-	for k, v := range bm {
-		gen := v >> bucketSizeBits
-		idx = v & ((1 << bucketSizeBits) - 1)
-		if (gen+1 == bGen || gen == maxGen && bGen == 1) && idx >= bIdx || gen == bGen && idx < bIdx {
-			continue
-		}
-		delete(bm, k)
-	}
-}
-
 func (b *bucket) UpdateStats(s *Stats, details bool) {
 	getCalls := atomic.LoadUint64(&b.getCalls)
 	s.GetCalls += getCalls
@@ -367,93 +358,6 @@ func (b *bucket) Set(k, v []byte, h uint64, sync bool) {
 		b.syncSet(k, v, h)
 	} else {
 		b.logger.log(k, v, h)
-	}
-}
-
-func (b *bucket) syncSet(k, v []byte, h uint64) {
-	atomic.AddUint64(&b.setCalls, 1)
-	if len(k) >= (1<<16) || len(v) >= (1<<16) {
-		// Too big key or value - its length cannot be encoded
-		// with 2 bytes (see below). Skip the entry.
-		return
-	}
-	var kvLenBuf [4]byte
-	kvLenBuf[0] = byte(uint16(len(k)) >> 8)
-	kvLenBuf[1] = byte(len(k))
-	kvLenBuf[2] = byte(uint16(len(v)) >> 8)
-	kvLenBuf[3] = byte(len(v))
-	kvLen := uint64(len(kvLenBuf) + len(k) + len(v))
-	if kvLen >= chunkSize {
-		// Do not store too big keys and values, since they do not
-		// fit a chunk.
-		return
-	}
-
-	chunks := b.chunks
-	needClean := false
-	b.mu.Lock()
-	idx := b.idx.Load()
-	idxNew := idx + kvLen
-	chunkIdx := idx / chunkSize
-	chunkIdxNew := idxNew / chunkSize
-	if chunkIdxNew > chunkIdx {
-		if chunkIdxNew >= uint64(len(chunks)) {
-			idx = 0
-			idxNew = kvLen
-			chunkIdx = 0
-			b.gen++
-			if b.gen&((1<<genSizeBits)-1) == 0 {
-				b.gen++
-			}
-			needClean = true
-		} else {
-			idx = chunkIdxNew * chunkSize
-			idxNew = idx + kvLen
-			chunkIdx = chunkIdxNew
-		}
-		chunks[chunkIdx] = chunks[chunkIdx][:0]
-	}
-	chunk := chunks[chunkIdx]
-	if chunk == nil {
-		chunk = getChunk()
-		chunk = chunk[:0]
-	}
-	chunk = append(chunk, kvLenBuf[:]...)
-	chunk = append(chunk, k...)
-	chunk = append(chunk, v...)
-	chunks[chunkIdx] = chunk
-	b.m[h] = idx | (b.gen << bucketSizeBits)
-	b.idx.Store(idxNew)
-	if needClean {
-		b.cleanLocked(idxNew)
-	}
-	b.mu.Unlock()
-}
-
-func (b *bucket) setBatch(chunks []flushChunk, idx uint64, gen uint64, needClean bool, keyCount int) {
-	atomic.AddUint64(&b.setCalls, uint64(keyCount))
-	atomic.AddUint64(&b.batchSetCalls, 1)
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for i := 0; i < len(chunks); i++ {
-		f := chunks[i]
-		chunk := b.chunks[f.chunkId]
-		if chunk == nil {
-			chunk = getChunk()[:0]
-		} else if f.cleanChunk {
-			chunk = chunk[:0]
-		}
-
-		b.chunks[f.chunkId] = append(chunk, f.chunk[:f.size]...)
-
-		for j := 0; j < len(f.h); j++ {
-			b.m[f.h[j]] = f.idx[j] | (f.gen[j] << bucketSizeBits)
-		}
-	}
-	b.idx.Store(idx)
-	b.gen = gen
-	if needClean {
-		b.cleanLocked(idx)
 	}
 }
 
@@ -517,4 +421,101 @@ func (b *bucket) Del(h uint64) {
 	b.mu.Lock()
 	delete(b.m, h)
 	b.mu.Unlock()
+}
+
+func (b *bucket) syncSet(k, v []byte, h uint64) {
+	atomic.AddUint64(&b.setCalls, 1)
+	if len(k) >= (1<<16) || len(v) >= (1<<16) {
+		// Too big key or value - its length cannot be encoded
+		// with 2 bytes (see below). Skip the entry.
+		return
+	}
+	kvLenBuf := makeKvLenBuf(k, v)
+	kvLen := uint64(len(kvLenBuf) + len(k) + len(v))
+	if kvLen >= chunkSize {
+		// Do not store too big keys and values, since they do not
+		// fit a chunk.
+		return
+	}
+
+	chunks := b.chunks
+	needClean := false
+	b.mu.Lock()
+	idx := b.idx.Load()
+	idxNew := idx + kvLen
+	chunkIdx := idx / chunkSize
+	chunkIdxNew := idxNew / chunkSize
+	if chunkIdxNew > chunkIdx {
+		if chunkIdxNew >= uint64(len(chunks)) {
+			idx = 0
+			idxNew = kvLen
+			chunkIdx = 0
+			b.gen++
+			if b.gen&((1<<genSizeBits)-1) == 0 {
+				b.gen++
+			}
+			needClean = true
+		} else {
+			idx = chunkIdxNew * chunkSize
+			idxNew = idx + kvLen
+			chunkIdx = chunkIdxNew
+		}
+		chunks[chunkIdx] = chunks[chunkIdx][:0]
+	}
+	chunk := chunks[chunkIdx]
+	if chunk == nil {
+		chunk = getChunk()
+		chunk = chunk[:0]
+	}
+	chunk = append(chunk, kvLenBuf[:]...)
+	chunk = append(chunk, k...)
+	chunk = append(chunk, v...)
+	chunks[chunkIdx] = chunk
+	b.m[h] = idx | (b.gen << bucketSizeBits)
+	b.idx.Store(idxNew)
+	if needClean {
+		b.cleanLocked(idxNew)
+	}
+	b.mu.Unlock()
+}
+
+func (b *bucket) setBatch(chunks []flushChunk, idx uint64, gen uint64, needClean bool, keyCount int) {
+	atomic.AddUint64(&b.setCalls, uint64(keyCount))
+	atomic.AddUint64(&b.batchSetCalls, 1)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i := 0; i < len(chunks); i++ {
+		f := chunks[i]
+		chunk := b.chunks[f.chunkId]
+		if chunk == nil {
+			chunk = getChunk()[:0]
+		} else if f.cleanChunk {
+			chunk = chunk[:0]
+		}
+
+		b.chunks[f.chunkId] = append(chunk, f.chunk[:f.chunkSize]...)
+
+		for j := 0; j < len(f.h); j++ {
+			b.m[f.h[j]] = f.idx[j] | (f.gen[j] << bucketSizeBits)
+		}
+	}
+	b.idx.Store(idx)
+	b.gen = gen
+	if needClean {
+		b.cleanLocked(idx)
+	}
+}
+
+func (b *bucket) cleanLocked(idx uint64) {
+	bGen := b.gen & ((1 << genSizeBits) - 1)
+	bIdx := idx
+	bm := b.m
+	for k, v := range bm {
+		gen := v >> bucketSizeBits
+		idx = v & ((1 << bucketSizeBits) - 1)
+		if (gen+1 == bGen || gen == maxGen && bGen == 1) && idx >= bIdx || gen == bGen && idx < bIdx {
+			continue
+		}
+		delete(bm, k)
+	}
 }

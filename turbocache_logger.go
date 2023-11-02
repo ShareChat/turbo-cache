@@ -34,17 +34,7 @@ type loggerStats struct {
 	duplicatedCount uint64
 }
 
-type flushChunk struct {
-	chunkId    uint64
-	chunk      [chunkSize]byte
-	h          []uint64
-	idx        []uint64
-	gen        []uint64
-	size       uint64
-	cleanChunk bool
-}
-
-func newLogger(bucket *bucket, maxBatch int, flushChunkCount int, idx uint64, gen uint64, chunks uint64, interval int64) writeAheadLogger {
+func newLogger(cacheWriter cacheWriter, maxBatch int, flushChunkCount int, idx uint64, gen uint64, chunks uint64, interval int64) writeAheadLogger {
 	result := &aheadLogger{
 		count:                  0,
 		idx:                    idx,
@@ -55,7 +45,7 @@ func newLogger(bucket *bucket, maxBatch int, flushChunkCount int, idx uint64, ge
 		needClean:              false,
 		setBuf:                 make(chan *queuedStruct, setBufSize),
 		chunks:                 make([]flushChunk, flushChunkCount),
-		writer:                 bucket,
+		writer:                 cacheWriter,
 		stats:                  &loggerStats{},
 		flushInterval:          interval,
 	}
@@ -73,7 +63,7 @@ func newLogger(bucket *bucket, maxBatch int, flushChunkCount int, idx uint64, ge
 			h:          make([]uint64, 0, itemsPerChunk),
 			idx:        make([]uint64, 0, itemsPerChunk),
 			gen:        make([]uint64, 0, itemsPerChunk),
-			size:       0,
+			chunkSize:  0,
 			cleanChunk: false,
 		}
 	}
@@ -141,9 +131,9 @@ func (l *aheadLogger) onNewItem(k, v []byte, h uint64, maxBatch int) {
 
 		lenBuf := makeKvLenBuf(k, v)
 
-		copy(flushChunk.chunk[flushChunk.size:], lenBuf[:])
-		copy(flushChunk.chunk[flushChunk.size+4:], k)
-		copy(flushChunk.chunk[flushChunk.size+4+uint64(len(k)):], v)
+		copy(flushChunk.chunk[flushChunk.chunkSize:], lenBuf[:])
+		copy(flushChunk.chunk[flushChunk.chunkSize+4:], k)
+		copy(flushChunk.chunk[flushChunk.chunkSize+4+uint64(len(k)):], v)
 
 		flushChunk.h = append(flushChunk.h, h)
 		flushChunk.idx = append(flushChunk.idx, l.idx)
@@ -153,14 +143,14 @@ func (l *aheadLogger) onNewItem(k, v []byte, h uint64, maxBatch int) {
 
 		for j := range index[indexId].h {
 			if atomic.LoadUint64(&index[indexId].h[j]) == 0 {
-				atomic.StoreUint64(&index[indexId].currentIdx[j], flushChunk.size)
+				atomic.StoreUint64(&index[indexId].currentIdx[j], flushChunk.chunkSize)
 				atomic.StoreInt32(&index[indexId].flushChunk[j], l.currentFlunkChunkIndex)
 				atomic.StoreUint64(&index[indexId].h[j], h)
 				break
 			}
 		}
 
-		flushChunk.size += kvLength
+		flushChunk.chunkSize += kvLength
 		l.idx = idxNew
 		l.count++
 		if l.latestTimestamp == 0 {
@@ -211,7 +201,7 @@ func (l *aheadLogger) clean() {
 func (b *flushChunk) clean() {
 	b.h = b.h[:0]
 	b.idx = b.idx[:0]
-	b.size = 0
+	b.chunkSize = 0
 	b.cleanChunk = false
 	b.gen = b.gen[:0]
 }
