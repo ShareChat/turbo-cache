@@ -14,7 +14,7 @@ type flushChunk struct {
 }
 
 type cacheWriter interface {
-	setBatch(chunks []flushChunk, idx uint64, gen uint64, needClean bool, keyCount int)
+	setBatch(chunks []flushChunk, newIdx uint64, newGen uint64, needClean bool, batchSize int)
 }
 
 func (b *flushChunk) clean() {
@@ -25,8 +25,8 @@ func (b *flushChunk) clean() {
 	b.gen = b.gen[:0]
 }
 
-func (b *bucket) setBatch(chunks []flushChunk, idx uint64, gen uint64, needClean bool, keyCount int) {
-	atomic.AddUint64(&b.setCalls, uint64(keyCount))
+func (b *bucket) setBatch(chunks []flushChunk, newIdx uint64, newGen uint64, needClean bool, batchSize int) {
+	atomic.AddUint64(&b.setCalls, uint64(batchSize))
 	atomic.AddUint64(&b.batchSetCalls, 1)
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -45,9 +45,9 @@ func (b *bucket) setBatch(chunks []flushChunk, idx uint64, gen uint64, needClean
 			b.m[f.h[j]] = f.idx[j] | (f.gen[j] << bucketSizeBits)
 		}
 	}
-	b.idx = idx
-	b.gen = gen
+	b.idx = newIdx
+	b.gen = newGen
 	if needClean {
-		b.cleanLocked(idx)
+		b.cleanLocked(newIdx)
 	}
 }

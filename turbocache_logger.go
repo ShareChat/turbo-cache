@@ -11,6 +11,7 @@ import (
 )
 
 type aheadLogger struct {
+	spinlock               spinlock.RWMutex
 	writer                 cacheWriter
 	setBuf                 chan *queuedStruct
 	count                  int
@@ -22,7 +23,6 @@ type aheadLogger struct {
 	needClean              bool
 	currentChunkId         uint64
 	totalChunkCount        uint64
-	spinlock               spinlock.RWMutex
 	latestTimestamp        int64
 	stats                  *loggerStats
 	flushInterval          int64
@@ -101,10 +101,8 @@ func (l *aheadLogger) startProcessingWriteQueue(maxBatch int) {
 }
 
 func (l *aheadLogger) log(k, v []byte, h uint64) {
-	iv := getQueuedStruct(k, v, h)
-
 	select {
-	case l.setBuf <- iv:
+	case l.setBuf <- getQueuedStruct(k, v, h):
 		return
 	default:
 		atomic.AddUint64(&l.stats.dropsInQueue, 1)
