@@ -2,6 +2,7 @@
 package turbocache
 
 import (
+	"github.com/ShareChat/turbo-cache/internal/primeNumber"
 	"github.com/ShareChat/turbo-cache/internal/spinlock"
 	"math/rand"
 	"sync"
@@ -34,6 +35,40 @@ type flushChunk struct {
 	gen        []uint64
 	size       uint64
 	cleanChunk bool
+}
+
+func newLogger(maxBatch int, flushChunkCount int, idx uint64, gen uint64, chunks uint64) *aheadLogger {
+	result := &aheadLogger{
+		count:           0,
+		idx:             idx,
+		gen:             gen,
+		currentChunkId:  idx / chunkSize,
+		chunkCount:      0,
+		totalChunkCount: chunks,
+		needClean:       false,
+		setBuf:          make(chan *queuedStruct, setBufSize),
+	}
+	result.chunks = make([]flushChunk, 4)
+
+	itemsPerChunk := maxBatch
+	if initItemsPerFlushChunk < itemsPerChunk {
+		itemsPerChunk = initItemsPerFlushChunk
+	}
+
+	for i := 0; i < flushChunkCount; i++ {
+		array := getChunkArray()
+		result.chunks[i] = flushChunk{
+			chunkId:    0,
+			chunk:      *array,
+			h:          make([]uint64, 0, itemsPerChunk),
+			idx:        make([]uint64, 0, itemsPerChunk),
+			gen:        make([]uint64, 0, itemsPerChunk),
+			size:       0,
+			cleanChunk: false,
+		}
+	}
+	result.index = make([]flushChunkIndexItem, primeNumber.NextPrime(uint64(maxBatch)))
+	return result
 }
 
 func (l *aheadLogger) log(k, v []byte, h uint64) {

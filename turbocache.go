@@ -3,7 +3,6 @@ package turbocache
 
 import (
 	"fmt"
-	"github.com/ShareChat/turbo-cache/internal/primeNumber"
 	"github.com/cespare/xxhash/v2"
 	"sync"
 	"sync/atomic"
@@ -304,7 +303,7 @@ func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, flushC
 }
 
 func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int, flushChunks int) {
-	b.initFlusher(maxBatch, flushChunks)
+	b.logger = newLogger(maxBatch, flushChunks, b.idx.Load(), b.gen, uint64(len(b.chunks)))
 	go func() {
 		maxDelay := flushInterval
 		if maxDelay > 5 {
@@ -327,39 +326,6 @@ func (b *bucket) startProcessingWriteQueue(flushInterval int64, maxBatch int, fl
 			}
 		}
 	}()
-}
-
-func (b *bucket) initFlusher(maxBatch int, chunks int) {
-	b.logger = &aheadLogger{
-		count:           0,
-		idx:             b.idx.Load(),
-		gen:             b.gen,
-		currentChunkId:  b.idx.Load() / chunkSize,
-		chunkCount:      0,
-		totalChunkCount: uint64(len(b.chunks)),
-		needClean:       false,
-		setBuf:          make(chan *queuedStruct, setBufSize),
-	}
-	b.logger.chunks = make([]flushChunk, 4)
-
-	itemsPerChunk := maxBatch
-	if initItemsPerFlushChunk < itemsPerChunk {
-		itemsPerChunk = initItemsPerFlushChunk
-	}
-
-	for i := 0; i < chunks; i++ {
-		array := getChunkArray()
-		b.logger.chunks[i] = flushChunk{
-			chunkId:    0,
-			chunk:      *array,
-			h:          make([]uint64, 0, itemsPerChunk),
-			idx:        make([]uint64, 0, itemsPerChunk),
-			gen:        make([]uint64, 0, itemsPerChunk),
-			size:       0,
-			cleanChunk: false,
-		}
-	}
-	b.logger.index = make([]flushChunkIndexItem, primeNumber.NextPrime(uint64(maxBatch)))
 }
 
 func (b *bucket) Reset() {
