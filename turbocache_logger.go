@@ -30,7 +30,6 @@ type aheadLogger struct {
 type loggerStats struct {
 	writeBufferSize uint64
 	dropsInQueue    uint64
-	droppedWrites   uint64
 	duplicatedCount uint64
 }
 

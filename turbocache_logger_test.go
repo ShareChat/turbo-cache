@@ -48,8 +48,8 @@ func TestCacheAsync(t *testing.T) {
 
 			var s Stats
 			c.UpdateStats(&s, true)
-			if s.DroppedWrites > calls/10 {
-				t.Fatalf("unexpected number of dropped writes; got %d; want > %d", s.DroppedWrites, calls/10)
+			if s.DropsInQueue > calls/10 {
+				t.Fatalf("unexpected number of dropped writes; got %d; want > %d", s.DropsInQueue, calls/10)
 			}
 		})
 	}

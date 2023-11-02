@@ -62,8 +62,6 @@ type Stats struct {
 	MaxBytesSize uint64
 	// drops due to buffer overflow
 	DropsInQueue uint64
-	// Drops due to write limit
-	DroppedWrites uint64
 	//queue write
 	WriteQueueSize uint64
 
@@ -347,7 +345,6 @@ func (b *bucket) UpdateStats(s *Stats, details bool) {
 
 	loggerStats := b.logger.getStats()
 	s.DropsInQueue += atomic.LoadUint64(&loggerStats.dropsInQueue)
-	s.DroppedWrites += atomic.LoadUint64(&loggerStats.droppedWrites)
 	s.WriteQueueSize += atomic.LoadUint64(&loggerStats.writeBufferSize)
 	s.DuplicatedCount += atomic.LoadUint64(&loggerStats.duplicatedCount)
 
