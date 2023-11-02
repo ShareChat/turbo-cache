@@ -178,7 +178,7 @@ func (l *aheadLogger) clean() {
 			if index[i].h[j] != 0 {
 				index[i].currentIdx[j] = 0
 				index[i].flushChunk[j] = 0
-				index[i].h[j] = 0
+				atomic.StoreUint64(&index[i].h[j], 0)
 			} else {
 				break
 			}
