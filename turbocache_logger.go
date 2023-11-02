@@ -15,11 +15,11 @@ type aheadLogger struct {
 	setBuf                 chan *queuedStruct
 	count                  int
 	chunks                 []flushChunk
+	index                  []flushChunkIndexItem
 	idx                    uint64
 	gen                    uint64
 	currentFlunkChunkIndex int32
 	needClean              bool
-	index                  []flushChunkIndexItem
 	currentChunkId         uint64
 	totalChunkCount        uint64
 	spinlock               spinlock.RWMutex
@@ -77,30 +77,33 @@ func newLogger(bucket *bucket, maxBatch int, flushChunkCount int, idx uint64, ge
 		}
 	}
 	result.index = make([]flushChunkIndexItem, primeNumber.NextPrime(uint64(maxBatch)))
-	go func() {
-		maxDelay := interval
-		if maxDelay > 5 {
-			maxDelay = 5
-		}
-		randomDelay(maxDelay)
-		t := time.Tick(time.Duration(interval) * time.Millisecond)
-		for {
-			select {
-			case i := <-result.setBuf:
-				if i == nil {
-					return
-				}
-				k, v := i.K, i.V
-				h := i.h
-				releaseQueuedStruct(i)
-				result.onNewItem(k, v, h, maxBatch, interval)
-			case _ = <-t:
-				result.onFlushTick(interval)
-			}
-		}
-	}()
+
+	go result.startProcessingWriteQueue(interval, maxBatch)
 
 	return result
+}
+
+func (l *aheadLogger) startProcessingWriteQueue(interval int64, maxBatch int) {
+	maxDelay := interval
+	if maxDelay > 5 {
+		maxDelay = 5
+	}
+	randomDelay(maxDelay)
+	t := time.Tick(time.Duration(interval) * time.Millisecond)
+	for {
+		select {
+		case i := <-l.setBuf:
+			if i == nil {
+				return
+			}
+			k, v := i.K, i.V
+			h := i.h
+			releaseQueuedStruct(i)
+			l.onNewItem(k, v, h, maxBatch, interval)
+		case _ = <-t:
+			l.onFlushTick(interval)
+		}
+	}
 }
 
 func (l *aheadLogger) log(k, v []byte, h uint64) {
