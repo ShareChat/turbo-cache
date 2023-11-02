@@ -11,20 +11,20 @@ import (
 )
 
 type aheadLogger struct {
-	setBuf          chan *queuedStruct
-	count           int
-	chunks          []flushChunk
-	idx             uint64
-	gen             uint64
-	chunkCount      int32
-	needClean       bool
-	index           []flushChunkIndexItem
-	currentChunkId  uint64
-	totalChunkCount uint64
-	spinlock        spinlock.RWMutex
-	latestTimestamp int64
-	writeBufferSize uint64
-	dropsInQueue    uint64
+	setBuf                 chan *queuedStruct
+	count                  int
+	chunks                 []flushChunk
+	idx                    uint64
+	gen                    uint64
+	currentFlunkChunkIndex int32
+	needClean              bool
+	index                  []flushChunkIndexItem
+	currentChunkId         uint64
+	totalChunkCount        uint64
+	spinlock               spinlock.RWMutex
+	latestTimestamp        int64
+	writeBufferSize        uint64
+	dropsInQueue           uint64
 }
 
 type flushChunk struct {
@@ -39,16 +39,16 @@ type flushChunk struct {
 
 func newLogger(maxBatch int, flushChunkCount int, idx uint64, gen uint64, chunks uint64) *aheadLogger {
 	result := &aheadLogger{
-		count:           0,
-		idx:             idx,
-		gen:             gen,
-		currentChunkId:  idx / chunkSize,
-		chunkCount:      0,
-		totalChunkCount: chunks,
-		needClean:       false,
-		setBuf:          make(chan *queuedStruct, setBufSize),
+		count:                  0,
+		idx:                    idx,
+		gen:                    gen,
+		currentChunkId:         idx / chunkSize,
+		currentFlunkChunkIndex: 0,
+		totalChunkCount:        chunks,
+		needClean:              false,
+		setBuf:                 make(chan *queuedStruct, setBufSize),
+		chunks:                 make([]flushChunk, flushChunkCount),
 	}
-	result.chunks = make([]flushChunk, 4)
 
 	itemsPerChunk := maxBatch
 	if initItemsPerFlushChunk < itemsPerChunk {
@@ -85,7 +85,7 @@ func (l *aheadLogger) log(k, v []byte, h uint64) {
 func (b *bucket) onFlushTick(flushInterval int64) {
 	f := b.logger
 	if f.count > 0 && time.Since(time.UnixMilli(f.latestTimestamp)).Milliseconds() >= flushInterval {
-		b.setBatch(f.chunks[:f.chunkCount+1], f.idx, f.gen, f.needClean, f.count)
+		b.setBatch(f.chunks[:f.currentFlunkChunkIndex+1], f.idx, f.gen, f.needClean, f.count)
 		f.clean()
 	}
 }
@@ -101,10 +101,15 @@ func (b *bucket) onNewItem(k, v []byte, h uint64, maxBatch int, flushInterval in
 		kvLength := uint64(4) + uint64(len(k)) + uint64(len(v))
 		idxNew, newChunk := f.incrementIndexes(kvLength)
 		if newChunk {
-			f.chunkCount++
+			if f.currentFlunkChunkIndex+1 >= int32(len(f.chunks)) {
+				forceFlush = true
+				atomic.AddUint64(&b.droppedWrites, 1)
+			} else {
+				f.currentFlunkChunkIndex++
+			}
 		}
-		if f.chunkCount <= int32(len(f.chunks)) {
-			flushChunk := &f.chunks[f.chunkCount]
+		if !forceFlush {
+			flushChunk := &f.chunks[f.currentFlunkChunkIndex]
 
 			lenBuf := makeKvLenBuf(k, v)
 
@@ -121,7 +126,7 @@ func (b *bucket) onNewItem(k, v []byte, h uint64, maxBatch int, flushInterval in
 			for j := range index[indexId].h {
 				if atomic.LoadUint64(&index[indexId].h[j]) == 0 {
 					atomic.StoreUint64(&index[indexId].currentIdx[j], flushChunk.size)
-					atomic.StoreInt32(&index[indexId].flushChunk[j], f.chunkCount)
+					atomic.StoreInt32(&index[indexId].flushChunk[j], f.currentFlunkChunkIndex)
 					atomic.StoreUint64(&index[indexId].h[j], h)
 					break
 				}
@@ -134,17 +139,13 @@ func (b *bucket) onNewItem(k, v []byte, h uint64, maxBatch int, flushInterval in
 				b.logger.latestTimestamp = time.Now().UnixMilli()
 			}
 			atomic.AddUint64(&b.logger.writeBufferSize, 1)
-		} else {
-			atomic.AddUint64(&b.droppedWrites, 1)
-			forceFlush = true
 		}
-
 	} else {
 		atomic.AddUint64(&b.duplicatedCount, 1)
 	}
 
 	if f.count >= maxBatch || (f.count > 0 && (time.Since(time.UnixMilli(b.logger.latestTimestamp)).Milliseconds() >= flushInterval || forceFlush)) {
-		b.setBatch(f.chunks[:f.chunkCount+1], f.idx, f.gen, f.needClean, f.count)
+		b.setBatch(f.chunks[:f.currentFlunkChunkIndex+1], f.idx, f.gen, f.needClean, f.count)
 		f.clean()
 	}
 }
@@ -169,7 +170,7 @@ func (l *aheadLogger) clean() {
 	}
 	l.spinlock.Unlock()
 
-	l.chunkCount = 0
+	l.currentFlunkChunkIndex = 0
 	l.needClean = false
 	l.count = 0
 	l.latestTimestamp = 0
