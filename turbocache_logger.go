@@ -134,9 +134,8 @@ func (l *aheadLogger) onNewItem(k, v []byte, h uint64, maxBatch int) {
 		}
 		flushChunk := &l.chunks[l.currentFlunkChunkIndex]
 
-		flushChunk.write(k, v)
+		flushChunk.write(h, k, v)
 
-		flushChunk.h = append(flushChunk.h, h)
 		flushChunk.idx = append(flushChunk.idx, l.idx)
 		flushChunk.gen = append(flushChunk.gen, l.gen)
 		flushChunk.chunkId = l.currentChunkId

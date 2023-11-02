@@ -17,20 +17,21 @@ type cacheWriter interface {
 	setBatch(chunks []flushChunk, newIdx uint64, newGen uint64, needClean bool, batchSize int)
 }
 
-func (b *flushChunk) clean() {
-	b.h = b.h[:0]
-	b.idx = b.idx[:0]
-	b.chunkSize = 0
-	b.cleanChunk = false
-	b.gen = b.gen[:0]
+func (ch *flushChunk) clean() {
+	ch.h = ch.h[:0]
+	ch.idx = ch.idx[:0]
+	ch.chunkSize = 0
+	ch.cleanChunk = false
+	ch.gen = ch.gen[:0]
 }
 
-func (b *flushChunk) write(k, v []byte) {
-	lenBuf := makeKvLenBuf(k, v)
+func (ch *flushChunk) write(h uint64, k, v []byte) {
+	ch.h = append(ch.h, h)
 
-	copy(b.chunk[b.chunkSize:], lenBuf[:])
-	copy(b.chunk[b.chunkSize+kvLenBufSize:], k)
-	copy(b.chunk[b.chunkSize+kvLenBufSize+uint64(len(k)):], v)
+	lenBuf := makeKvLenBuf(k, v)
+	copy(ch.chunk[ch.chunkSize:], lenBuf[:])
+	copy(ch.chunk[ch.chunkSize+kvLenBufSize:], k)
+	copy(ch.chunk[ch.chunkSize+kvLenBufSize+uint64(len(k)):], v)
 }
 
 func (b *bucket) setBatch(chunks []flushChunk, newIdx uint64, newGen uint64, needClean bool, batchSize int) {
