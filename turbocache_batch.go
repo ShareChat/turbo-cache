@@ -25,6 +25,14 @@ func (b *flushChunk) clean() {
 	b.gen = b.gen[:0]
 }
 
+func (b *flushChunk) write(k, v []byte) {
+	lenBuf := makeKvLenBuf(k, v)
+
+	copy(b.chunk[b.chunkSize:], lenBuf[:])
+	copy(b.chunk[b.chunkSize+kvLenBufSize:], k)
+	copy(b.chunk[b.chunkSize+kvLenBufSize+uint64(len(k)):], v)
+}
+
 func (b *bucket) setBatch(chunks []flushChunk, newIdx uint64, newGen uint64, needClean bool, batchSize int) {
 	atomic.AddUint64(&b.setCalls, uint64(batchSize))
 	atomic.AddUint64(&b.batchSetCalls, 1)

@@ -123,7 +123,7 @@ func (l *aheadLogger) onNewItem(k, v []byte, h uint64, maxBatch int) {
 	index := l.index
 	indexItem := &index[h%uint64(len(index))]
 	if !indexItem.exists(h) {
-		kvLength := uint64(4) + uint64(len(k)) + uint64(len(v))
+		kvLength := kvLenBufSize + uint64(len(k)) + uint64(len(v))
 		idxNew, newChunk := l.incrementIndexes(kvLength)
 		if newChunk {
 			if l.currentFlunkChunkIndex+1 >= int32(len(l.chunks)) {
@@ -134,11 +134,7 @@ func (l *aheadLogger) onNewItem(k, v []byte, h uint64, maxBatch int) {
 		}
 		flushChunk := &l.chunks[l.currentFlunkChunkIndex]
 
-		lenBuf := makeKvLenBuf(k, v)
-
-		copy(flushChunk.chunk[flushChunk.chunkSize:], lenBuf[:])
-		copy(flushChunk.chunk[flushChunk.chunkSize+kvLenBufSize:], k)
-		copy(flushChunk.chunk[flushChunk.chunkSize+kvLenBufSize+uint64(len(k)):], v)
+		flushChunk.write(k, v)
 
 		flushChunk.h = append(flushChunk.h, h)
 		flushChunk.idx = append(flushChunk.idx, l.idx)
