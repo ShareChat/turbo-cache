@@ -274,14 +274,12 @@ type bucket struct {
 	// gen is the generation of chunks.
 	gen uint64
 
-	getCalls        uint64
-	setCalls        uint64
-	batchSetCalls   uint64
-	misses          uint64
-	collisions      uint64
-	corruptions     uint64
-	droppedWrites   uint64
-	duplicatedCount uint64
+	getCalls      uint64
+	setCalls      uint64
+	batchSetCalls uint64
+	misses        uint64
+	collisions    uint64
+	corruptions   uint64
 }
 
 func (b *bucket) Init(maxBytes uint64, flushInterval int64, maxBatch int, flushChunks int, syncWrite bool) {
@@ -348,10 +346,10 @@ func (b *bucket) UpdateStats(s *Stats, details bool) {
 	s.Collisions += atomic.LoadUint64(&b.collisions)
 	s.Corruptions += atomic.LoadUint64(&b.corruptions)
 	s.DropsInQueue += atomic.LoadUint64(&b.logger.dropsInQueue)
-	s.DroppedWrites += atomic.LoadUint64(&b.droppedWrites)
+	s.DroppedWrites += atomic.LoadUint64(&b.logger.droppedWrites)
 	s.WriteQueueSize += atomic.LoadUint64(&b.logger.writeBufferSize) + uint64(len(b.logger.setBuf))
 	s.SetBatchCalls += atomic.LoadUint64(&b.batchSetCalls)
-	s.DuplicatedCount += atomic.LoadUint64(&b.duplicatedCount)
+	s.DuplicatedCount += atomic.LoadUint64(&b.logger.duplicatedCount)
 
 	b.mu.RLock()
 	s.EntriesCount += uint64(len(b.m))

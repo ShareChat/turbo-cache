@@ -11,7 +11,7 @@ import (
 )
 
 type aheadLogger struct {
-	bucket                 *bucket
+	writer                 cacheWriter
 	setBuf                 chan *queuedStruct
 	count                  int
 	chunks                 []flushChunk
@@ -26,6 +26,8 @@ type aheadLogger struct {
 	latestTimestamp        int64
 	writeBufferSize        uint64
 	dropsInQueue           uint64
+	droppedWrites          uint64
+	duplicatedCount        uint64
 }
 
 type flushChunk struct {
@@ -49,7 +51,7 @@ func newLogger(bucket *bucket, maxBatch int, flushChunkCount int, idx uint64, ge
 		needClean:              false,
 		setBuf:                 make(chan *queuedStruct, setBufSize),
 		chunks:                 make([]flushChunk, flushChunkCount),
-		bucket:                 bucket,
+		writer:                 bucket,
 	}
 
 	itemsPerChunk := maxBatch
@@ -109,7 +111,7 @@ func (l *aheadLogger) log(k, v []byte, h uint64) {
 
 func (l *aheadLogger) onFlushTick(flushInterval int64) {
 	if l.count > 0 && time.Since(time.UnixMilli(l.latestTimestamp)).Milliseconds() >= flushInterval {
-		l.bucket.setBatch(l.chunks[:l.currentFlunkChunkIndex+1], l.idx, l.gen, l.needClean, l.count)
+		l.writer.setBatch(l.chunks[:l.currentFlunkChunkIndex+1], l.idx, l.gen, l.needClean, l.count)
 		l.clean()
 	}
 }
@@ -125,7 +127,7 @@ func (l *aheadLogger) onNewItem(k, v []byte, h uint64, maxBatch int, flushInterv
 		if newChunk {
 			if l.currentFlunkChunkIndex+1 >= int32(len(l.chunks)) {
 				forceFlush = true
-				atomic.AddUint64(&l.bucket.droppedWrites, 1)
+				atomic.AddUint64(&l.droppedWrites, 1)
 			} else {
 				l.currentFlunkChunkIndex++
 			}
@@ -163,11 +165,11 @@ func (l *aheadLogger) onNewItem(k, v []byte, h uint64, maxBatch int, flushInterv
 			atomic.AddUint64(&l.writeBufferSize, 1)
 		}
 	} else {
-		atomic.AddUint64(&l.bucket.duplicatedCount, 1)
+		atomic.AddUint64(&l.duplicatedCount, 1)
 	}
 
 	if l.count >= maxBatch || (l.count > 0 && (time.Since(time.UnixMilli(l.latestTimestamp)).Milliseconds() >= flushInterval || forceFlush)) {
-		l.bucket.setBatch(l.chunks[:l.currentFlunkChunkIndex+1], l.idx, l.gen, l.needClean, l.count)
+		l.writer.setBatch(l.chunks[:l.currentFlunkChunkIndex+1], l.idx, l.gen, l.needClean, l.count)
 		l.clean()
 	}
 }
@@ -269,4 +271,8 @@ func releaseQueuedStruct(i *queuedStruct) {
 type queuedStruct struct {
 	K, V []byte
 	h    uint64
+}
+
+type cacheWriter interface {
+	setBatch(chunks []flushChunk, idx uint64, gen uint64, needClean bool, keyCount int)
 }
