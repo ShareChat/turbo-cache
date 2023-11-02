@@ -12,8 +12,8 @@ type flushChunkIndexItem struct {
 	currentIdx [7]uint64
 }
 
-func (i *flushChunkIndexItem) exists(h uint64) bool {
-	for _, hv := range i.h {
+func (l *flushChunkIndexItem) exists(h uint64) bool {
+	for _, hv := range l.h {
 		if hv == h {
 			return true
 		} else if hv == 0 {
@@ -21,6 +21,17 @@ func (i *flushChunkIndexItem) exists(h uint64) bool {
 		}
 	}
 	return false
+}
+
+func (l *flushChunkIndexItem) save(h uint64, flushChunkIndex int32, kvIndex uint64) {
+	for j := range l.h {
+		if atomic.LoadUint64(&l.h[j]) == 0 {
+			atomic.StoreUint64(&l.currentIdx[j], kvIndex)
+			atomic.StoreInt32(&l.flushChunk[j], flushChunkIndex)
+			atomic.StoreUint64(&l.h[j], h)
+			break
+		}
+	}
 }
 
 func (l *aheadLogger) lookup(dst []byte, k []byte, h uint64, returnDst bool) ([]byte, bool) {

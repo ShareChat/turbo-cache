@@ -23,7 +23,7 @@ type aheadLogger struct {
 	needClean              bool
 	currentChunkId         uint64
 	totalChunkCount        uint64
-	latestTimestamp        int64
+	oldestKeyTimestamp     int64
 	stats                  *loggerStats
 	flushInterval          int64
 }
@@ -116,7 +116,7 @@ func (l *aheadLogger) onFlushTick() {
 }
 
 func (l *aheadLogger) flushTime() bool {
-	return l.count > 0 && time.Since(time.UnixMilli(l.latestTimestamp)).Milliseconds() >= l.flushInterval
+	return l.count > 0 && time.Since(time.UnixMilli(l.oldestKeyTimestamp)).Milliseconds() >= l.flushInterval
 }
 
 func (l *aheadLogger) onNewItem(k, v []byte, h uint64, maxBatch int) {
@@ -141,20 +141,13 @@ func (l *aheadLogger) onNewItem(k, v []byte, h uint64, maxBatch int) {
 		flushChunk.chunkId = l.currentChunkId
 		flushChunk.cleanChunk = newChunk
 
-		for j := range indexItem.h {
-			if atomic.LoadUint64(&indexItem.h[j]) == 0 {
-				atomic.StoreUint64(&indexItem.currentIdx[j], flushChunk.chunkSize)
-				atomic.StoreInt32(&indexItem.flushChunk[j], l.currentFlunkChunkIndex)
-				atomic.StoreUint64(&indexItem.h[j], h)
-				break
-			}
-		}
+		indexItem.save(h, l.currentFlunkChunkIndex, flushChunk.chunkSize)
 
 		flushChunk.chunkSize += kvLength
 		l.idx = idxNew
 		l.count++
-		if l.latestTimestamp == 0 {
-			l.latestTimestamp = time.Now().UnixMilli()
+		if l.oldestKeyTimestamp == 0 {
+			l.oldestKeyTimestamp = time.Now().UnixMilli()
 		}
 		atomic.AddUint64(&l.stats.writeBufferSize, 1)
 	} else {
@@ -194,7 +187,7 @@ func (l *aheadLogger) clean() {
 	l.currentFlunkChunkIndex = 0
 	l.needClean = false
 	l.count = 0
-	l.latestTimestamp = 0
+	l.oldestKeyTimestamp = 0
 	atomic.StoreUint64(&l.stats.writeBufferSize, 0)
 }
 
