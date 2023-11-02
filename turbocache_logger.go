@@ -85,11 +85,7 @@ func newLogger(bucket *bucket, maxBatch int, flushChunkCount int, idx uint64, ge
 }
 
 func (l *aheadLogger) startProcessingWriteQueue(maxBatch int) {
-	maxDelay := l.flushInterval
-	if maxDelay > 5 {
-		maxDelay = 5
-	}
-	randomDelay(maxDelay)
+	randomDelay()
 	t := time.Tick(time.Duration(l.flushInterval) * time.Millisecond)
 	for {
 		select {
@@ -220,8 +216,8 @@ func (b *flushChunk) clean() {
 	b.gen = b.gen[:0]
 }
 
-func randomDelay(maxDelayMillis int64) {
-	jitterDelay := rand.Int63() % (maxDelayMillis * 1000)
+func randomDelay() {
+	jitterDelay := rand.Int63() % (5 * 1000)
 	time.Sleep(time.Duration(jitterDelay) * time.Microsecond)
 }
 
