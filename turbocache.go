@@ -234,9 +234,7 @@ func (c *Cache) Close() {
 
 func (c *Cache) stopFlushing() {
 	for i := range c.buckets[:] {
-		if c.buckets[i].logger.setBuf != nil {
-			close(c.buckets[i].logger.setBuf)
-		}
+		c.buckets[i].logger.stopFlushing()
 	}
 }
 
@@ -267,7 +265,7 @@ type bucket struct {
 
 	// m maps hash(k) to idx of (k, v) pair in chunks.
 	m      map[uint64]uint64
-	logger *aheadLogger
+	logger writeAheadLogger
 	// idx points to chunks for writing the next (k, v) pair.
 	idx atomic.Uint64
 
@@ -345,11 +343,13 @@ func (b *bucket) UpdateStats(s *Stats, details bool) {
 	s.Misses += atomic.LoadUint64(&b.misses)
 	s.Collisions += atomic.LoadUint64(&b.collisions)
 	s.Corruptions += atomic.LoadUint64(&b.corruptions)
-	s.DropsInQueue += atomic.LoadUint64(&b.logger.dropsInQueue)
-	s.DroppedWrites += atomic.LoadUint64(&b.logger.droppedWrites)
-	s.WriteQueueSize += atomic.LoadUint64(&b.logger.writeBufferSize) + uint64(len(b.logger.setBuf))
 	s.SetBatchCalls += atomic.LoadUint64(&b.batchSetCalls)
-	s.DuplicatedCount += atomic.LoadUint64(&b.logger.duplicatedCount)
+
+	loggerStats := b.logger.getStats()
+	s.DropsInQueue += atomic.LoadUint64(&loggerStats.dropsInQueue)
+	s.DroppedWrites += atomic.LoadUint64(&loggerStats.droppedWrites)
+	s.WriteQueueSize += atomic.LoadUint64(&loggerStats.writeBufferSize)
+	s.DuplicatedCount += atomic.LoadUint64(&loggerStats.duplicatedCount)
 
 	b.mu.RLock()
 	s.EntriesCount += uint64(len(b.m))
@@ -491,7 +491,8 @@ func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool, boo
 				//removed stats for corruption
 				goto end
 			}
-			if string(k) == string(chunk[idx:idx+keyLen]) {
+			s := string(chunk[idx : idx+keyLen])
+			if string(k) == s {
 				idx += keyLen
 				if returnDst {
 					dst = append(dst, chunk[idx:idx+valLen]...)

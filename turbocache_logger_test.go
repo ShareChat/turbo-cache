@@ -225,7 +225,7 @@ func TestAsyncInsertToCache(t *testing.T) {
 				key := []byte(fmt.Sprintf("key %d", i))
 				hash := xxhash.Sum64(key)
 				expectedValue := []byte(fmt.Sprintf("value %d", i))
-				bucket.logger.onNewItem(key, expectedValue, hash, batch, 50000000)
+				bucket.logger.(*aheadLogger).onNewItem(key, expectedValue, hash, batch, 50000000)
 
 				actualValue, found, _ := bucket.Get(nil, key, hash, true)
 
@@ -262,7 +262,7 @@ func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
 					key := []byte(fmt.Sprintf("key %d", i))
 					h := xxhash.Sum64(key)
 
-					bucket.logger.onNewItem(key, key, h, batch, 50000000)
+					bucket.logger.(*aheadLogger).onNewItem(key, key, h, batch, 50000000)
 					wg.Add(1)
 					go func() {
 						actualValue, found, l1cache := bucket.Get(nil, key, h, true)
@@ -358,7 +358,7 @@ func (c *Cache) waitForExpectedCacheSize(delayInMillis int) error {
 
 	for time.Since(t).Milliseconds() < int64(delayInMillis) {
 		for i := range c.buckets {
-			if len(c.buckets[i].logger.setBuf) > 0 && atomic.LoadUint64(&c.buckets[i].logger.writeBufferSize) > 0 {
+			if len(c.buckets[i].logger.(*aheadLogger).setBuf) > 0 && atomic.LoadUint64(&c.buckets[i].logger.(*aheadLogger).stats.writeBufferSize) > 0 {
 				time.Sleep(time.Duration(delayInMillis/10) * time.Millisecond)
 				continue
 			}

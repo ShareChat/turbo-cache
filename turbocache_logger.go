@@ -24,10 +24,14 @@ type aheadLogger struct {
 	totalChunkCount        uint64
 	spinlock               spinlock.RWMutex
 	latestTimestamp        int64
-	writeBufferSize        uint64
-	dropsInQueue           uint64
-	droppedWrites          uint64
-	duplicatedCount        uint64
+	stats                  *loggerStats
+}
+
+type loggerStats struct {
+	writeBufferSize uint64
+	dropsInQueue    uint64
+	droppedWrites   uint64
+	duplicatedCount uint64
 }
 
 type flushChunk struct {
@@ -40,7 +44,7 @@ type flushChunk struct {
 	cleanChunk bool
 }
 
-func newLogger(bucket *bucket, maxBatch int, flushChunkCount int, idx uint64, gen uint64, chunks uint64, interval int64) *aheadLogger {
+func newLogger(bucket *bucket, maxBatch int, flushChunkCount int, idx uint64, gen uint64, chunks uint64, interval int64) writeAheadLogger {
 	result := &aheadLogger{
 		count:                  0,
 		idx:                    idx,
@@ -52,6 +56,7 @@ func newLogger(bucket *bucket, maxBatch int, flushChunkCount int, idx uint64, ge
 		setBuf:                 make(chan *queuedStruct, setBufSize),
 		chunks:                 make([]flushChunk, flushChunkCount),
 		writer:                 bucket,
+		stats:                  &loggerStats{},
 	}
 
 	itemsPerChunk := maxBatch
@@ -105,7 +110,7 @@ func (l *aheadLogger) log(k, v []byte, h uint64) {
 	case l.setBuf <- iv:
 		return
 	default:
-		atomic.AddUint64(&l.dropsInQueue, 1)
+		atomic.AddUint64(&l.stats.dropsInQueue, 1)
 	}
 }
 
@@ -127,7 +132,7 @@ func (l *aheadLogger) onNewItem(k, v []byte, h uint64, maxBatch int, flushInterv
 		if newChunk {
 			if l.currentFlunkChunkIndex+1 >= int32(len(l.chunks)) {
 				forceFlush = true
-				atomic.AddUint64(&l.droppedWrites, 1)
+				atomic.AddUint64(&l.stats.droppedWrites, 1)
 			} else {
 				l.currentFlunkChunkIndex++
 			}
@@ -162,10 +167,10 @@ func (l *aheadLogger) onNewItem(k, v []byte, h uint64, maxBatch int, flushInterv
 			if l.latestTimestamp == 0 {
 				l.latestTimestamp = time.Now().UnixMilli()
 			}
-			atomic.AddUint64(&l.writeBufferSize, 1)
+			atomic.AddUint64(&l.stats.writeBufferSize, 1)
 		}
 	} else {
-		atomic.AddUint64(&l.duplicatedCount, 1)
+		atomic.AddUint64(&l.stats.duplicatedCount, 1)
 	}
 
 	if l.count >= maxBatch || (l.count > 0 && (time.Since(time.UnixMilli(l.latestTimestamp)).Milliseconds() >= flushInterval || forceFlush)) {
@@ -198,7 +203,7 @@ func (l *aheadLogger) clean() {
 	l.needClean = false
 	l.count = 0
 	l.latestTimestamp = 0
-	atomic.StoreUint64(&l.writeBufferSize, 0)
+	atomic.StoreUint64(&l.stats.writeBufferSize, 0)
 }
 
 func (b *flushChunk) clean() {
@@ -268,6 +273,16 @@ func releaseQueuedStruct(i *queuedStruct) {
 	insertValuePool.Put(i)
 }
 
+func (l *aheadLogger) getStats() *loggerStats {
+	return l.stats
+}
+
+func (l *aheadLogger) stopFlushing() {
+	if l.setBuf != nil {
+		close(l.setBuf)
+	}
+}
+
 type queuedStruct struct {
 	K, V []byte
 	h    uint64
@@ -275,4 +290,11 @@ type queuedStruct struct {
 
 type cacheWriter interface {
 	setBatch(chunks []flushChunk, idx uint64, gen uint64, needClean bool, keyCount int)
+}
+
+type writeAheadLogger interface {
+	log(k, v []byte, h uint64)
+	lookup(dst []byte, k []byte, h uint64, returnDst bool) ([]byte, bool)
+	getStats() *loggerStats
+	stopFlushing()
 }
