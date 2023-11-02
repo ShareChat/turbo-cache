@@ -2,9 +2,11 @@ package turbocache
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"github.com/cespare/xxhash/v2"
+	"golang.org/x/sync/semaphore"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -256,6 +258,7 @@ func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
 			ch := make(chan string, 128)
 			var notFoundCount atomic.Int32
 			bucket := &c.buckets[0]
+			throttler := semaphore.NewWeighted(int64(runtime.NumCPU()))
 			go func() {
 				var wg sync.WaitGroup
 				for i := 0; i < itemsCount; i++ {
@@ -264,12 +267,13 @@ func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
 
 					bucket.logger.(*aheadLogger).onNewItem(key, key, h, batch, 50000000)
 					wg.Add(1)
+					_ = throttler.Acquire(context.Background(), 1)
 					go func() {
 						actualValue, found, l1cache := bucket.Get(nil, key, h, true)
 						if !found {
 							notFoundCount.Add(1)
 							//it can be delayed and many items can be evicted
-							if notFoundCount.Load() > int32(itemsCount/2) {
+							if notFoundCount.Load() > int32(itemsCount)/2 {
 								ch <- fmt.Sprintf("not found count expected less than %d, got %d", itemsCount/2, notFoundCount.Load())
 							}
 						}
@@ -277,10 +281,13 @@ func TestAsyncInsertToCacheConcurrentRead(t *testing.T) {
 							ch <- fmt.Sprintf("%s, wanted %s got %s, l1cache: %v", string(key), string(key), string(actualValue), l1cache)
 						}
 						wg.Done()
+						throttler.Release(1)
 					}()
 				}
 				wg.Wait()
 				close(ch)
+				fmt.Printf("stats not found %d out pf %d", notFoundCount.Load(), itemsCount)
+
 			}()
 			for err := range ch {
 				t.Fatalf(err)
