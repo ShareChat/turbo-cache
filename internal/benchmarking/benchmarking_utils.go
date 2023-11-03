@@ -22,18 +22,10 @@ func (m *mutexMetricsCollector) Report(b *testing.B) {
 	b.ReportMetric(value/float64(b.N), "mutex_wait_ns/op")
 }
 
-func (m *mutexMetricsCollector) getCurrentTotalWaits() float64 {
-	sample := make([]metrics.Sample, 1)
-	sample[0].Name = "/sync/mutex/wait/total:seconds"
-	metrics.Read(sample)
-	mutexTotalWaits := sample[0].Value.Float64()
-	return mutexTotalWaits * 1000000
-}
-
 func getCurrentTotalWaits() float64 {
 	sample := make([]metrics.Sample, 1)
 	sample[0].Name = "/sync/mutex/wait/total:seconds"
 	metrics.Read(sample)
 	mutexTotalWaits := sample[0].Value.Float64()
-	return mutexTotalWaits * 1000
+	return mutexTotalWaits * 1000000
 }
