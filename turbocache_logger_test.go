@@ -301,7 +301,7 @@ func TestCacheResetUpdateStatsSetConcurrent(t *testing.T) {
 	defer c.Close()
 	stopCh := make(chan struct{})
 
-	// run workers for cache reset
+	// run workers for cache Reset
 	var resettersWG sync.WaitGroup
 	for i := 0; i < 10; i++ {
 		resettersWG.Add(1)

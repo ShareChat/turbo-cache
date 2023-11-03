@@ -2,6 +2,7 @@ package turbocache
 
 import (
 	"fmt"
+	"github.com/ShareChat/turbo-cache/internal/benchmarking"
 	"github.com/VictoriaMetrics/fastcache"
 	"sync"
 	"testing"
@@ -38,11 +39,14 @@ func BenchmarkCacheSet(b *testing.B) {
 	writeKeys(c, items, []byte("\x00\x00\x00\x00"), []byte("xyza"))
 	b.ReportAllocs()
 	b.SetBytes(items)
+	b.ResetTimer()
+	mutexMetricCollector := benchmarking.NewMutexMetricsCollector()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			writeKeys(c, items, []byte("\x00\x00\x00\x00"), []byte("xyza"))
 		}
 	})
+	mutexMetricCollector.Report(b)
 }
 
 func BenchmarkFastCacheCacheSet(b *testing.B) {
@@ -52,11 +56,14 @@ func BenchmarkFastCacheCacheSet(b *testing.B) {
 	writeKeysFastCache(c, items, []byte("\x00\x00\x00\x00"), []byte("xyza"))
 	b.ReportAllocs()
 	b.SetBytes(items)
+	b.ResetTimer()
+	mutexMetricCollector := benchmarking.NewMutexMetricsCollector()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			writeKeysFastCache(c, items, []byte("\x00\x00\x00\x00"), []byte("xyza"))
 		}
 	})
+	mutexMetricCollector.Report(b)
 }
 
 func BenchmarkCacheGet(b *testing.B) {
@@ -75,6 +82,8 @@ func BenchmarkCacheGet(b *testing.B) {
 
 	b.ReportAllocs()
 	b.SetBytes(items)
+	mutexMetricCollector := benchmarking.NewMutexMetricsCollector()
+	mutexMetricCollector.Reset()
 	b.RunParallel(func(pb *testing.PB) {
 		var buf []byte
 		k := []byte("\x00\x00\x00\x00")
@@ -88,6 +97,7 @@ func BenchmarkCacheGet(b *testing.B) {
 			}
 		}
 	})
+	mutexMetricCollector.Report(b)
 }
 
 func BenchmarkFastCachCacheGet(b *testing.B) {
@@ -106,6 +116,8 @@ func BenchmarkFastCachCacheGet(b *testing.B) {
 
 	b.ReportAllocs()
 	b.SetBytes(items)
+	b.ResetTimer()
+	mutexMetricCollector := benchmarking.NewMutexMetricsCollector()
 	b.RunParallel(func(pb *testing.PB) {
 		var buf []byte
 		k := []byte("\x00\x00\x00\x00")
@@ -119,6 +131,7 @@ func BenchmarkFastCachCacheGet(b *testing.B) {
 			}
 		}
 	})
+	mutexMetricCollector.Report(b)
 }
 
 func BenchmarkCacheSetGet(b *testing.B) {
@@ -128,6 +141,8 @@ func BenchmarkCacheSetGet(b *testing.B) {
 	writeKeys(c, items, []byte("\x00\x00\x00\x00"), []byte("xyza"))
 	b.ReportAllocs()
 	b.SetBytes(2 * items)
+	b.ResetTimer()
+	mutexMetricCollector := benchmarking.NewMutexMetricsCollector()
 	b.RunParallel(func(pb *testing.PB) {
 		k := []byte("\x00\x00\x00\x00")
 		v := []byte("xyza")
@@ -149,6 +164,7 @@ func BenchmarkCacheSetGet(b *testing.B) {
 			}
 		}
 	})
+	mutexMetricCollector.Report(b)
 }
 
 func BenchmarkFastCacheCacheSetGet(b *testing.B) {
@@ -158,6 +174,8 @@ func BenchmarkFastCacheCacheSetGet(b *testing.B) {
 	writeKeysFastCache(c, items, []byte("\x00\x00\x00\x00"), []byte("xyza"))
 	b.ReportAllocs()
 	b.SetBytes(2 * items)
+	b.ResetTimer()
+	mutexMetricCollector := benchmarking.NewMutexMetricsCollector()
 	b.RunParallel(func(pb *testing.PB) {
 		k := []byte("\x00\x00\x00\x00")
 		v := []byte("xyza")
@@ -179,6 +197,7 @@ func BenchmarkFastCacheCacheSetGet(b *testing.B) {
 			}
 		}
 	})
+	mutexMetricCollector.Report(b)
 }
 
 func BenchmarkStdMapSet(b *testing.B) {
@@ -187,6 +206,8 @@ func BenchmarkStdMapSet(b *testing.B) {
 	var mu sync.Mutex
 	b.ReportAllocs()
 	b.SetBytes(items)
+	b.ResetTimer()
+	mutexMetricCollector := benchmarking.NewMutexMetricsCollector()
 	b.RunParallel(func(pb *testing.PB) {
 		k := []byte("\x00\x00\x00\x00")
 		v := []byte("xyza")
@@ -202,6 +223,7 @@ func BenchmarkStdMapSet(b *testing.B) {
 			}
 		}
 	})
+	mutexMetricCollector.Report(b)
 }
 
 func BenchmarkStdMapGet(b *testing.B) {
@@ -220,6 +242,8 @@ func BenchmarkStdMapGet(b *testing.B) {
 	var mu sync.RWMutex
 	b.ReportAllocs()
 	b.SetBytes(items)
+	b.ResetTimer()
+	mutexMetricCollector := benchmarking.NewMutexMetricsCollector()
 	b.RunParallel(func(pb *testing.PB) {
 		k := []byte("\x00\x00\x00\x00")
 		for pb.Next() {
@@ -237,6 +261,7 @@ func BenchmarkStdMapGet(b *testing.B) {
 			}
 		}
 	})
+	mutexMetricCollector.Report(b)
 }
 
 func BenchmarkStdMapSetGet(b *testing.B) {
@@ -245,6 +270,8 @@ func BenchmarkStdMapSetGet(b *testing.B) {
 	var mu sync.RWMutex
 	b.ReportAllocs()
 	b.SetBytes(2 * items)
+	b.ResetTimer()
+	mutexMetricCollector := benchmarking.NewMutexMetricsCollector()
 	b.RunParallel(func(pb *testing.PB) {
 		k := []byte("\x00\x00\x00\x00")
 		v := []byte("xyza")
@@ -272,6 +299,7 @@ func BenchmarkStdMapSetGet(b *testing.B) {
 			}
 		}
 	})
+	mutexMetricCollector.Report(b)
 }
 
 func BenchmarkSyncMapSet(b *testing.B) {
@@ -279,6 +307,8 @@ func BenchmarkSyncMapSet(b *testing.B) {
 	m := sync.Map{}
 	b.ReportAllocs()
 	b.SetBytes(items)
+	b.ResetTimer()
+	mutexMetricCollector := benchmarking.NewMutexMetricsCollector()
 	b.RunParallel(func(pb *testing.PB) {
 		k := []byte("\x00\x00\x00\x00")
 		v := "xyza"
@@ -292,6 +322,7 @@ func BenchmarkSyncMapSet(b *testing.B) {
 			}
 		}
 	})
+	mutexMetricCollector.Report(b)
 }
 
 func BenchmarkSyncMapGet(b *testing.B) {
@@ -309,6 +340,8 @@ func BenchmarkSyncMapGet(b *testing.B) {
 
 	b.ReportAllocs()
 	b.SetBytes(items)
+	b.ResetTimer()
+	mutexMetricCollector := benchmarking.NewMutexMetricsCollector()
 	b.RunParallel(func(pb *testing.PB) {
 		k := []byte("\x00\x00\x00\x00")
 		for pb.Next() {
@@ -324,6 +357,7 @@ func BenchmarkSyncMapGet(b *testing.B) {
 			}
 		}
 	})
+	mutexMetricCollector.Report(b)
 }
 
 func BenchmarkSyncMapSetGet(b *testing.B) {
@@ -331,6 +365,8 @@ func BenchmarkSyncMapSetGet(b *testing.B) {
 	m := sync.Map{}
 	b.ReportAllocs()
 	b.SetBytes(2 * items)
+	b.ResetTimer()
+	mutexMetricCollector := benchmarking.NewMutexMetricsCollector()
 	b.RunParallel(func(pb *testing.PB) {
 		k := []byte("\x00\x00\x00\x00")
 		v := "xyza"
@@ -354,6 +390,7 @@ func BenchmarkSyncMapSetGet(b *testing.B) {
 			}
 		}
 	})
+	mutexMetricCollector.Report(b)
 }
 
 func newCacheConfigBenchmarkParams(maxBytes int) *Config {
