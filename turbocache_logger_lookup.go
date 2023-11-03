@@ -34,7 +34,7 @@ func (l *flushChunkIndexItem) save(h uint64, flushChunkIndex int32, kvIndex uint
 	}
 }
 
-func (l *aheadLogger) lookup(dst []byte, k []byte, h uint64, returnDst bool) ([]byte, bool) {
+func (l *cacheLogger) lookup(dst []byte, k []byte, h uint64, returnDst bool) ([]byte, bool) {
 	if l == nil {
 		return dst, false
 	}

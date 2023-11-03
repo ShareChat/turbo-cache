@@ -15,7 +15,7 @@ const defaultMaxWriteSizeBatch = 250
 const defaultFlushIntervalMillis = 5
 const initItemsPerFlushChunk = 128
 
-type aheadLogger struct {
+type cacheLogger struct {
 	spinlock               spinlock.RWMutex
 	writer                 cacheWriter
 	setBuf                 chan *queuedStruct
@@ -47,7 +47,7 @@ type writeAheadLogger interface {
 }
 
 func newLogger(cacheWriter cacheWriter, maxBatch int, flushChunkCount int, idx uint64, gen uint64, chunks uint64, interval int64) writeAheadLogger {
-	result := &aheadLogger{
+	result := &cacheLogger{
 		count:                  0,
 		idx:                    idx,
 		gen:                    gen,
@@ -86,7 +86,7 @@ func newLogger(cacheWriter cacheWriter, maxBatch int, flushChunkCount int, idx u
 	return result
 }
 
-func (l *aheadLogger) startProcessingWriteQueue(maxBatch int) {
+func (l *cacheLogger) startProcessingWriteQueue(maxBatch int) {
 	randomDelay()
 	t := time.Tick(time.Duration(l.flushInterval) * time.Millisecond)
 	for {
@@ -105,7 +105,7 @@ func (l *aheadLogger) startProcessingWriteQueue(maxBatch int) {
 	}
 }
 
-func (l *aheadLogger) log(k, v []byte, h uint64) {
+func (l *cacheLogger) log(k, v []byte, h uint64) {
 	select {
 	case l.setBuf <- getQueuedStruct(k, v, h):
 		return
@@ -114,17 +114,17 @@ func (l *aheadLogger) log(k, v []byte, h uint64) {
 	}
 }
 
-func (l *aheadLogger) onFlushTick() {
+func (l *cacheLogger) onFlushTick() {
 	if l.flushTime() {
 		l.flush()
 	}
 }
 
-func (l *aheadLogger) flushTime() bool {
+func (l *cacheLogger) flushTime() bool {
 	return l.count > 0 && time.Since(time.UnixMilli(l.oldestKeyTimestamp)).Milliseconds() >= l.flushInterval
 }
 
-func (l *aheadLogger) onNewItem(k, v []byte, h uint64, maxBatch int) {
+func (l *cacheLogger) onNewItem(k, v []byte, h uint64, maxBatch int) {
 	index := l.index
 	indexItem := &index[h%uint64(len(index))]
 	if !indexItem.exists(h) {
@@ -164,12 +164,12 @@ func (l *aheadLogger) onNewItem(k, v []byte, h uint64, maxBatch int) {
 	}
 }
 
-func (l *aheadLogger) flush() {
+func (l *cacheLogger) flush() {
 	l.writer.setBatch(l.chunks[:l.currentFlunkChunkIndex+1], l.idx, l.gen, l.needClean, l.count)
 	l.clean()
 }
 
-func (l *aheadLogger) clean() {
+func (l *cacheLogger) clean() {
 	index := l.index
 	l.spinlock.Lock()
 
@@ -201,7 +201,7 @@ func randomDelay() {
 	time.Sleep(time.Duration(jitterDelay) * time.Microsecond)
 }
 
-func (l *aheadLogger) incrementIndexes(kvLength uint64) (idxNew uint64, newChunk bool) {
+func (l *cacheLogger) incrementIndexes(kvLength uint64) (idxNew uint64, newChunk bool) {
 	idxNew = l.idx + kvLength
 	chunkIdxNew := idxNew / chunkSize
 	if chunkIdxNew > l.currentChunkId {
@@ -255,11 +255,11 @@ func releaseQueuedStruct(i *queuedStruct) {
 	insertValuePool.Put(i)
 }
 
-func (l *aheadLogger) getStats() *loggerStats {
+func (l *cacheLogger) getStats() *loggerStats {
 	return l.stats
 }
 
-func (l *aheadLogger) stopFlushing() {
+func (l *cacheLogger) stopFlushing() {
 	if l.setBuf != nil {
 		close(l.setBuf)
 	}
