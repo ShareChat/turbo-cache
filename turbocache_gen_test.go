@@ -42,7 +42,7 @@ func TestGenerationOverflow(t *testing.T) {
 	// Actually doing this takes ~24 seconds, making the test slow
 	c.buckets[100].gen = (1 << 24) - 2
 
-	// c.buckets[100].gen == 16,777,215
+	// c.buckets[100].cacheGen == 16,777,215
 	// Set/Get still works
 
 	c.Set(key1, bigVal1)
@@ -54,9 +54,9 @@ func TestGenerationOverflow(t *testing.T) {
 	genVal(t, c, (1<<24)-1)
 
 	// After the next Set operations
-	// c.buckets[100].gen == 16,777,216
+	// c.buckets[100].cacheGen == 16,777,216
 
-	// This set creates an index where `idx | (b.gen << bucketSizeBits)` == 0
+	// This set creates an index where `cacheIdx | (b.cacheGen << bucketSizeBits)` == 0
 	// The value is in the cache but is unreadable by Get
 	c.Set(key1, bigVal1)
 	// The Set above overflowed the bucket's generation. This means that
@@ -64,7 +64,7 @@ func TestGenerationOverflow(t *testing.T) {
 	// _very large_ generation value and appears to be from the future
 	getVal(t, c, key2, bigVal2)
 
-	// This Set creates an index where `(b.gen << bucketSizeBits)>>bucketSizeBits==0`
+	// This Set creates an index where `(b.cacheGen << bucketSizeBits)>>bucketSizeBits==0`
 	// The value is in the cache but is unreadable by Get
 	c.Set(key2, bigVal2)
 	// Ensure generations are working as we expect

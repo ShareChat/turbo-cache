@@ -18,7 +18,7 @@ const initItemsPerFlushChunk = 128
 type cacheLogger struct {
 	spinlock               spinlock.RWMutex
 	writer                 cacheWriter
-	setBuf                 chan *queuedStruct
+	setQueue               chan *queuedStruct
 	count                  int
 	chunks                 []flushChunk
 	index                  []flushChunkIndexItem
@@ -31,10 +31,10 @@ type cacheLogger struct {
 	oldestKeyTimestamp     int64
 	stats                  *loggerStats
 	flushInterval          int64
+	maxBatch               int
 }
 
 type loggerStats struct {
-	writeBufferSize uint64
 	dropsInQueue    uint64
 	duplicatedCount uint64
 }
@@ -55,11 +55,12 @@ func newLogger(cacheWriter cacheWriter, maxBatch int, flushChunkCount int, idx u
 		currentFlunkChunkIndex: 0,
 		totalChunkCount:        chunks,
 		needClean:              false,
-		setBuf:                 make(chan *queuedStruct, setBufSize),
+		setQueue:               make(chan *queuedStruct, setBufSize),
 		chunks:                 make([]flushChunk, flushChunkCount),
 		writer:                 cacheWriter,
 		stats:                  &loggerStats{},
 		flushInterval:          interval,
+		maxBatch:               maxBatch,
 	}
 
 	itemsPerChunk := maxBatch
@@ -70,35 +71,35 @@ func newLogger(cacheWriter cacheWriter, maxBatch int, flushChunkCount int, idx u
 	for i := 0; i < flushChunkCount; i++ {
 		array := getChunkArray()
 		result.chunks[i] = flushChunk{
-			chunkId:    0,
-			chunk:      *array,
-			h:          make([]uint64, 0, itemsPerChunk),
-			idx:        make([]uint64, 0, itemsPerChunk),
-			gen:        make([]uint64, 0, itemsPerChunk),
-			chunkSize:  0,
-			cleanChunk: false,
+			cacheChunkId:    0,
+			chunk:           *array,
+			h:               make([]uint64, 0, itemsPerChunk),
+			cacheIdx:        make([]uint64, 0, itemsPerChunk),
+			cacheGen:        make([]uint64, 0, itemsPerChunk),
+			chunkSize:       0,
+			cleanCacheChunk: false,
 		}
 	}
 	result.index = make([]flushChunkIndexItem, primeNumber.NextPrime(uint64(maxBatch)))
 
-	go result.startProcessingWriteQueue(maxBatch)
+	go result.startProcessingWriteQueue()
 
 	return result
 }
 
-func (l *cacheLogger) startProcessingWriteQueue(maxBatch int) {
+func (l *cacheLogger) startProcessingWriteQueue() {
 	randomDelay()
 	t := time.Tick(time.Duration(l.flushInterval) * time.Millisecond)
 	for {
 		select {
-		case i := <-l.setBuf:
+		case i := <-l.setQueue:
 			if i == nil {
 				return
 			}
 			k, v := i.K, i.V
 			h := i.h
 			releaseQueuedStruct(i)
-			l.onNewItem(k, v, h, maxBatch)
+			l.onNewItem(k, v, h)
 		case _ = <-t:
 			l.onFlushTick()
 		}
@@ -107,7 +108,7 @@ func (l *cacheLogger) startProcessingWriteQueue(maxBatch int) {
 
 func (l *cacheLogger) log(k, v []byte, h uint64) {
 	select {
-	case l.setBuf <- getQueuedStruct(k, v, h):
+	case l.setQueue <- getQueuedStruct(k, v, h):
 		return
 	default:
 		atomic.AddUint64(&l.stats.dropsInQueue, 1)
@@ -124,7 +125,7 @@ func (l *cacheLogger) flushTime() bool {
 	return l.count > 0 && time.Since(time.UnixMilli(l.oldestKeyTimestamp)).Milliseconds() >= l.flushInterval
 }
 
-func (l *cacheLogger) onNewItem(k, v []byte, h uint64, maxBatch int) {
+func (l *cacheLogger) onNewItem(k, v []byte, h uint64) {
 	index := l.index
 	indexItem := &index[h%uint64(len(index))]
 	if !indexItem.exists(h) {
@@ -141,10 +142,10 @@ func (l *cacheLogger) onNewItem(k, v []byte, h uint64, maxBatch int) {
 
 		flushChunk.write(h, k, v)
 
-		flushChunk.idx = append(flushChunk.idx, l.idx)
-		flushChunk.gen = append(flushChunk.gen, l.gen)
-		flushChunk.chunkId = l.currentChunkId
-		flushChunk.cleanChunk = newChunk
+		flushChunk.cacheIdx = append(flushChunk.cacheIdx, l.idx)
+		flushChunk.cacheGen = append(flushChunk.cacheGen, l.gen)
+		flushChunk.cacheChunkId = l.currentChunkId
+		flushChunk.cleanCacheChunk = newChunk
 
 		indexItem.save(h, l.currentFlunkChunkIndex, flushChunk.chunkSize)
 
@@ -154,12 +155,11 @@ func (l *cacheLogger) onNewItem(k, v []byte, h uint64, maxBatch int) {
 		if l.oldestKeyTimestamp == 0 {
 			l.oldestKeyTimestamp = time.Now().UnixMilli()
 		}
-		atomic.AddUint64(&l.stats.writeBufferSize, 1)
 	} else {
 		atomic.AddUint64(&l.stats.duplicatedCount, 1)
 	}
 
-	if l.count >= maxBatch || l.flushTime() {
+	if l.count >= l.maxBatch || l.flushTime() {
 		l.flush()
 	}
 }
@@ -193,7 +193,6 @@ func (l *cacheLogger) clean() {
 	l.needClean = false
 	l.count = 0
 	l.oldestKeyTimestamp = 0
-	atomic.StoreUint64(&l.stats.writeBufferSize, 0)
 }
 
 func randomDelay() {
@@ -260,8 +259,8 @@ func (l *cacheLogger) getStats() *loggerStats {
 }
 
 func (l *cacheLogger) stopFlushing() {
-	if l.setBuf != nil {
-		close(l.setBuf)
+	if l.setQueue != nil {
+		close(l.setQueue)
 	}
 }
 

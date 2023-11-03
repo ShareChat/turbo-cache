@@ -57,8 +57,6 @@ type Stats struct {
 	MaxBytesSize uint64
 	// drops due to buffer overflow
 	DropsInQueue uint64
-	//queue write
-	WriteQueueSize uint64
 
 	// BigStats contains stats for GetBig/SetBig methods.
 	BigStats
@@ -229,7 +227,6 @@ func (c *Cache) stopFlushing() {
 //
 // Call s.Reset before calling UpdateStats if s is re-used.
 func (c *Cache) UpdateStats(s *Stats, details bool) {
-	s.WriteQueueSize = 0
 	s.BucketGetCalls = make([]uint64, 0, bucketsCount)
 	s.BucketsSetCalls = make([]uint64, 0, bucketsCount)
 	for i := range c.buckets[:] {
@@ -320,7 +317,6 @@ func (b *bucket) UpdateStats(s *Stats, details bool) {
 
 	loggerStats := b.logger.getStats()
 	s.DropsInQueue += atomic.LoadUint64(&loggerStats.dropsInQueue)
-	s.WriteQueueSize += atomic.LoadUint64(&loggerStats.writeBufferSize)
 	s.DuplicatedCount += atomic.LoadUint64(&loggerStats.duplicatedCount)
 
 	b.mu.RLock()
