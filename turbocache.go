@@ -136,7 +136,7 @@ func New(config *Config) *Cache {
 	}
 
 	var c Cache
-	c.syncWrite = config.maxBytes <= 1 || config.flushIntervalMillis <= 0
+	c.syncWrite = config.maxWriteBatch <= 1 || config.flushIntervalMillis <= 0
 	maxBucketBytes := uint64((config.maxBytes + bucketsCount - 1) / bucketsCount)
 	for i := range c.buckets[:] {
 		c.buckets[i].Init(maxBucketBytes, config.flushIntervalMillis, config.maxWriteBatch, config.flushChunkCount, c.syncWrite)
@@ -291,6 +291,7 @@ func (b *bucket) Reset() {
 	b.idx = 0
 	b.gen = 1
 	b.mu.Unlock()
+	//todo: update logger
 	atomic.StoreUint64(&b.getCalls, 0)
 	atomic.StoreUint64(&b.setCalls, 0)
 	atomic.StoreUint64(&b.misses, 0)
