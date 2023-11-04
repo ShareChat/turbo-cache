@@ -1,7 +1,7 @@
 //go:build appengine || windows
 // +build appengine windows
 
-package fastcache
+package turbocache
 
 func getChunk() []byte {
 	return make([]byte, chunkSize)
@@ -9,4 +9,9 @@ func getChunk() []byte {
 
 func putChunk(chunk []byte) {
 	// No-op.
+}
+
+func getChunkArray() *[chunkSize]byte {
+	var result [chunkSize]byte
+	return &result
 }

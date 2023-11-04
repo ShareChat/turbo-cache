@@ -1,7 +1,6 @@
 //go:build !appengine && !windows
-// +build !appengine,!windows
 
-package fastcache
+package turbocache
 
 import (
 	"fmt"
@@ -19,6 +18,10 @@ var (
 )
 
 func getChunk() []byte {
+	return getChunkArray()[:]
+}
+
+func getChunkArray() *[chunkSize]byte {
 	freeChunksLock.Lock()
 	if len(freeChunks) == 0 {
 		// Allocate offheap memory, so GOGC won't take into account cache size.
@@ -38,7 +41,7 @@ func getChunk() []byte {
 	freeChunks[n] = nil
 	freeChunks = freeChunks[:n]
 	freeChunksLock.Unlock()
-	return p[:]
+	return p
 }
 
 func putChunk(chunk []byte) {
